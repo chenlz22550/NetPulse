@@ -21,10 +21,12 @@ import (
 var aiToolNames = []string{
 	"get_overview", "list_devices", "get_device", "get_history", "list_alerts",
 	"get_settings", "get_discovery", "get_locate_status", "get_switch_mac_table", "locate_device",
+	// 分析类
+	"analyze_impact", "get_uplink_path", "find_outages", "correlate_events", "rank_devices", "compare_baseline", "ping_now",
 }
 
 const (
-	aiMaxRounds     = 8     // 最多几轮工具调用
+	aiMaxRounds     = 10    // 最多几轮工具调用
 	aiMaxToolCalls  = 24    // 一次诊断最多调用工具次数
 	aiMaxToolResult = 16000 // 单个工具结果最多字符数
 	aiMaxHistory    = 20    // 对话最多保留条数
@@ -39,6 +41,12 @@ func aiSystemPrompt(site string) string {
 机房：` + site + `；当前时间：` + time.Now().Format("2006-01-02 15:04:05 (Mon)") + `。
 
 你可以调用只读工具查询实时状态、历史曲线、告警记录、网段扫描和端口定位结果；你不能修改任何配置。
+分析工具（优先用它们代替逐台查询）：
+- 多台设备异常 → analyze_impact（按交换机/端口归类，找最靠近核心的公共故障点、同一时刻开始异常的设备组）；
+- 单台设备 → get_uplink_path（逐跳看上联交换机和同端口设备）、find_outages（历史每段中断的起止时间、可用率、按小时分布）、compare_baseline（与昨天/上周同时段对比，判断是否变差）；
+- “是不是一起掉的”、停电/重启判断 → correlate_events（按分钟对齐多台设备的异常）；
+- “最近哪些设备最不稳定” → rank_devices（按丢包/延迟/中断时长排行，附全网中位数）；
+- 需要确认当前是否真的不通、或测试外网出口 → ping_now（从 netPing 主机实时 ping，最多 10 次）。
 要求：
 1. 先看「当前概况」，需要细节时再调用工具（如某台设备的历史曲线、某个交换机下的设备、最近告警）。不要臆测没有查到的数据；工具调用尽量少而准。
 2. 用简体中文回答，结构：**结论**（1~3 句）→ **依据**（关键数据：设备名/IP、数值、时间）→ **建议排查**（按可能性排序、机房运维人员能动手执行的具体步骤）。一般不超过 400 字，用户要求详细时再展开。
@@ -139,6 +147,10 @@ func (s *Server) handleAI(w http.ResponseWriter, r *http.Request, arg string) er
 		return s.handleAITest(w, r)
 	case arg == "diagnose" && r.Method == http.MethodPost:
 		return s.handleAIDiagnose(w, r)
+	case arg == "optimize" && r.Method == http.MethodPost:
+		return s.handleAIOptimize(w, r)
+	case arg == "optimize/apply" && r.Method == http.MethodPost:
+		return s.handleAIOptimizeApply(w, r)
 	}
 	return notFound("接口")
 }
@@ -299,10 +311,34 @@ func (s *Server) handleAIDiagnose(w http.ResponseWriter, r *http.Request) error 
 	}
 	question := truncRunes(req.Messages[len(req.Messages)-1].Content, 60)
 
+	res, err := s.aiLoop(ctx, c, msgs, aiMaxRounds, 0, remote, emit)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			log.Printf("AI 诊断已取消（%s）：%s", clientAddr(r), question)
+			return nil
+		}
+		log.Printf("AI 诊断失败（%s）：%v", clientAddr(r), err)
+		emit(map[string]interface{}{"t": "error", "error": err.Error()})
+		return nil
+	}
+	calls, total := res.Calls, res.Usage
+	ms := time.Since(start).Milliseconds()
+	log.Printf("AI 诊断（%s，%s）：%s —— 工具 %d 次，%d tokens，%.1f 秒", clientAddr(r), c.AI.Model, question, calls, total.TotalTokens, float64(ms)/1000)
+	emit(map[string]interface{}{"t": "done", "usage": total, "tools": calls, "ms": ms, "model": c.AI.Model})
+	return nil
+}
+
+type aiRunResult struct {
+	Final string // 最后一轮（不再调用工具）的回复
+	Calls int
+	Usage llm.Usage
+}
+
+// aiLoop 与模型多轮对话：模型可调用只读工具，直到给出不含工具调用的回复或达到轮数上限。
+func (s *Server) aiLoop(ctx context.Context, c config.Config, msgs []llm.Message, maxRounds, maxTokens int, remote string, emit func(map[string]interface{})) (aiRunResult, error) {
 	cl := s.aiClient(c)
 	tools := aiTools()
-	var total llm.Usage
-	calls := 0
+	var res aiRunResult
 	for round := 0; ; round++ {
 		if round > 0 {
 			emit(map[string]interface{}{"t": "status", "text": "正在分析…"})
@@ -310,39 +346,30 @@ func (s *Server) handleAIDiagnose(w http.ResponseWriter, r *http.Request) error 
 			emit(map[string]interface{}{"t": "status", "text": "正在请求模型…"})
 		}
 		useTools := tools
-		if round >= aiMaxRounds || calls >= aiMaxToolCalls {
+		if round >= maxRounds || res.Calls >= aiMaxToolCalls {
 			useTools = nil // 最后一轮不再给工具，强制给出结论
 		}
-		msg, usage, err := cl.Stream(ctx, llm.Request{Messages: msgs, Tools: useTools}, func(d string) {
+		msg, usage, err := cl.Stream(ctx, llm.Request{Messages: msgs, Tools: useTools, MaxTokens: maxTokens}, func(d string) {
 			emit(map[string]interface{}{"t": "delta", "text": d})
 		})
-		total.Add(usage)
+		res.Usage.Add(usage)
 		if err != nil {
 			if errors.Is(err, context.DeadlineExceeded) {
-				err = fmt.Errorf("诊断超时（超过 %d 秒），可以换个更具体的问题再试", c.AI.TimeoutSec)
+				err = fmt.Errorf("AI 分析超时（超过 %d 秒），可以稍后重试或在「AI 诊断」页调大超时", c.AI.TimeoutSec)
 			}
-			if errors.Is(err, context.Canceled) {
-				log.Printf("AI 诊断已取消（%s）：%s", clientAddr(r), question)
-				return nil
-			}
-			log.Printf("AI 诊断失败（%s）：%v", clientAddr(r), err)
-			emit(map[string]interface{}{"t": "error", "error": err.Error()})
-			return nil
+			return res, err
 		}
 		if len(msg.ToolCalls) == 0 || useTools == nil {
-			break
+			res.Final = msg.Content
+			return res, nil
 		}
 		msgs = append(msgs, msg)
 		for _, tc := range msg.ToolCalls {
-			calls++
+			res.Calls++
 			title, result := s.runAITool(tc.Function.Name, tc.Function.Arguments, remote)
 			emit(map[string]interface{}{"t": "tool", "name": tc.Function.Name, "title": title, "args": truncRunes(tc.Function.Arguments, 300)})
 			msgs = append(msgs, llm.Message{Role: "tool", ToolCallID: tc.ID, Content: result})
 		}
 		emit(map[string]interface{}{"t": "break"})
 	}
-	ms := time.Since(start).Milliseconds()
-	log.Printf("AI 诊断（%s，%s）：%s —— 工具 %d 次，%d tokens，%.1f 秒", clientAddr(r), c.AI.Model, question, calls, total.TotalTokens, float64(ms)/1000)
-	emit(map[string]interface{}{"t": "done", "usage": total, "tools": calls, "ms": ms, "model": c.AI.Model})
-	return nil
 }
