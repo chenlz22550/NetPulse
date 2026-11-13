@@ -441,7 +441,7 @@ func Load(path string) (*Manager, error) {
 	m.cfg.Normalize()
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return m, m.save()
+		return m, m.save(m.cfg)
 	}
 	if err != nil {
 		return nil, err
@@ -494,20 +494,23 @@ func (c Config) Clone() Config {
 
 // Update 校验并保存新配置。
 func (m *Manager) Update(c Config) error {
+	c = c.Clone()
 	c.Normalize()
 	if err := c.Validate(); err != nil {
 		return err
 	}
 	m.mu.Lock()
+	defer m.mu.Unlock()
+	// 保存与发布配置属于同一个事务；失败时保持原有内存配置。
+	if err := m.save(c); err != nil {
+		return err
+	}
 	m.cfg = c
-	m.mu.Unlock()
-	return m.save()
+	return nil
 }
 
-func (m *Manager) save() error {
-	m.mu.RLock()
-	cfg := m.cfg
-	m.mu.RUnlock()
+// save 的调用方须持有写锁，或尚未将 Manager 发布给其它协程。
+func (m *Manager) save(cfg Config) error {
 	var buf bytes.Buffer
 	buf.WriteString(header)
 	enc := yaml.NewEncoder(&buf)

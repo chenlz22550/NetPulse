@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"netping/internal/alert"
@@ -41,9 +42,15 @@ type Server struct {
 	// OnPauseChange 在网页上暂停/恢复监控后调用（用于同步托盘菜单）。
 	OnPauseChange func(bool)
 
-	started time.Time
-	http    *http.Server
-	auth    authState
+	started        time.Time
+	http           *http.Server
+	auth           authState
+	telnetMu       sync.Mutex
+	telnetSessions map[net.Conn]struct{}
+	telnetClosed   bool
+	sshMu          sync.Mutex
+	sshSessions    map[string]*sshTerminal
+	sshHostMu      sync.Mutex
 }
 
 // Start 开始监听，返回实际监听地址。
@@ -73,6 +80,12 @@ func (s *Server) Start() (string, error) {
 
 // Close 关闭服务。
 func (s *Server) Close() {
+	s.telnetMu.Lock()
+	s.telnetClosed = true
+	for conn := range s.telnetSessions {
+		_ = conn.Close()
+	}
+	s.telnetMu.Unlock()
 	if s.http != nil {
 		_ = s.http.Close()
 	}
@@ -183,6 +196,12 @@ func (s *Server) routeAPI(w http.ResponseWriter, r *http.Request) {
 		err = s.handlePutYAML(w, r)
 	case head == "site" && m == http.MethodPut:
 		err = s.handleSite(w, r)
+	case head == "nodes" && arg == "cleanup" && m == http.MethodGet:
+		s.handleNodeCleanupPreview(w)
+	case head == "nodes" && arg == "cleanup" && m == http.MethodPost:
+		err = s.handleNodeCleanup(w, r)
+	case head == "nodes" && strings.HasSuffix(arg, "/lock") && m == http.MethodPut:
+		err = s.handleNodeLock(w, r, strings.TrimSuffix(arg, "/lock"))
 	case head == "nodes" && arg == "" && m == http.MethodPost:
 		err = s.handleNodeSave(w, r, "")
 	case head == "nodes" && arg != "" && m == http.MethodPut:
@@ -225,6 +244,12 @@ func (s *Server) routeAPI(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, s.Alerts.History(300))
 	case head == "locate" && arg == "" && m == http.MethodGet:
 		writeJSON(w, s.locateStatus())
+	case head == "locate" && strings.HasPrefix(arg, "telnet/") && m == http.MethodGet:
+		err = s.handleTelnet(w, r, strings.TrimPrefix(arg, "telnet/"))
+	case head == "locate" && strings.HasPrefix(arg, "ssh/") && m == http.MethodGet:
+		err = s.handleSSH(w, r, strings.TrimPrefix(arg, "ssh/"))
+	case head == "locate" && strings.HasPrefix(arg, "ssh-upload/") && m == http.MethodPost:
+		err = s.handleSSHUpload(w, r, strings.TrimPrefix(arg, "ssh-upload/"))
 	case head == "locate" && arg == "run" && m == http.MethodPost:
 		err = s.handleLocateRun(w, r)
 	case head == "locate" && arg == "test" && m == http.MethodPost:

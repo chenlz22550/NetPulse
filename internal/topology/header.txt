@@ -50,6 +50,7 @@
 #
 # nodes[]:                         终端节点
 #   id                             唯一标识（可空，自动生成）
+#   locked                         上锁保护，true 时一键清理保留（默认 false，与 IP 分配方式无关）
 #   name                           显示名（可空，默认显示 IP）
 #   hostname                       主机名，网段扫描自动获得（NetBIOS / mDNS / 反向 DNS），未填 name 时显示它
 #   ip                             IPv4 地址，为空则不监控

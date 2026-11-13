@@ -318,6 +318,15 @@ func (w *worker) getTarget() Target {
 func (w *worker) setTarget(t Target) {
 	w.mu.Lock()
 	old := w.target
+	// 更密集的采样需要更大的窗口。只扩容，避免调慢采样时丢失已有历史。
+	if capacity := int(time.Hour/t.Interval) + 16; capacity > len(w.ring) {
+		ring := make([]Sample, capacity)
+		for i := 0; i < w.n; i++ {
+			ring[i] = w.ring[(w.head-w.n+i+len(w.ring))%len(w.ring)]
+		}
+		w.ring = ring
+		w.head = w.n
+	}
 	w.target = t
 	w.mu.Unlock()
 	if old.Interval != t.Interval {

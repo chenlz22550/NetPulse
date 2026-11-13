@@ -75,6 +75,7 @@ type Link struct {
 // Node 终端节点。
 type Node struct {
 	ID       string      `yaml:"id" json:"id"`
+	Locked   bool        `yaml:"locked,omitempty" json:"locked"` // 上锁后不参与批量清理
 	Name     string      `yaml:"name,omitempty" json:"name"`
 	Hostname string      `yaml:"hostname,omitempty" json:"hostname"` // 网段扫描自动获得的主机名（NetBIOS / mDNS / 反向 DNS）
 	IP       string      `yaml:"ip,omitempty" json:"ip"`
