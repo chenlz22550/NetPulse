@@ -23,6 +23,8 @@ var aiToolNames = []string{
 	"get_settings", "get_discovery", "get_locate_status", "get_switch_mac_table", "locate_device",
 	// 分析类
 	"analyze_impact", "get_uplink_path", "find_outages", "correlate_events", "rank_devices", "compare_baseline", "ping_now",
+	// 现场核实类
+	"get_switch_ports", "tcp_check", "arp_lookup", "trace_route", "dns_lookup",
 }
 
 const (
@@ -47,12 +49,19 @@ func aiSystemPrompt(site string) string {
 - “是不是一起掉的”、停电/重启判断 → correlate_events（按分钟对齐多台设备的异常）；
 - “最近哪些设备最不稳定” → rank_devices（按丢包/延迟/中断时长排行，附全网中位数）；
 - 需要确认当前是否真的不通、或测试外网出口 → ping_now（从 netPing 主机实时 ping，最多 10 次）。
+现场核实工具（从 netPing 主机实时探测，用来验证判断，而不是只凭历史数据推测）：
+- tcp_check：ping 不通时测常用 TCP 端口——有端口开放或拒绝连接，说明主机在线、只是禁 ping；也可确认打印机、摄像头、远程桌面等服务；
+- arp_lookup：同网段设备是否仍回应 ARP、MAC 是否与登记一致（发现 IP 冲突、设备被更换）；
+- get_switch_ports：通过 SNMP 读交换机端口的 up/down、速率、双工、错误/丢弃计数的增长、最近状态变化、带宽占用和交换机运行时长（核实网线/端口故障、双工不匹配、闪断、拥塞、交换机重启）；
+- trace_route：到外网或跨网段地址逐跳追踪，看断在哪一跳；
+- dns_lookup：域名解析是否正常，可指定 DNS 服务器对比。
 要求：
 1. 先看「当前概况」，需要细节时再调用工具（如某台设备的历史曲线、某个交换机下的设备、最近告警）。不要臆测没有查到的数据；工具调用尽量少而准。
-2. 用简体中文回答，结构：**结论**（1~3 句）→ **依据**（关键数据：设备名/IP、数值、时间）→ **建议排查**（按可能性排序、机房运维人员能动手执行的具体步骤）。一般不超过 400 字，用户要求详细时再展开。
+2. 用简体中文回答，结构：**结论**（1~3 句）→ **依据**（关键数据：设备名/IP、数值、时间；注明哪些是刚才实测的、哪些是推断）→ **建议排查**（按可能性排序并标注把握：高/中/低，给机房运维人员能动手执行的具体步骤）。一般不超过 400 字，用户要求详细时再展开。
 3. 判断思路：同一交换机或同一端口下多台同时异常 → 优先怀疑该交换机、上联链路或该端口；单台异常 → 设备本身、网线、端口；网关异常会影响整个网段；只丢包不离线 → 链路质量、双工不匹配、拥塞、无线信号；延迟高 → 负载、无线、环路或广播风暴；多台设备同一时刻离线又恢复 → 停电、交换机重启或上联中断。
 4. 状态含义：ok 正常、slow 延迟高、loss 丢包、down 离线、unknown 刚开始监控、paused 暂停、unmonitored 未监控。标记为「仅 ARP」或停用监控、无 IP 的设备本来就没有 ping 数据，不算故障。监控暂停或不在监控时段时没有新数据。
-5. 如果一切正常，直接说明正常，并指出值得留意的小问题（如个别设备偶发丢包）；数据不足以下结论时说明还需要什么信息。`
+5. 如果一切正常，直接说明正常，并指出值得留意的小问题（如个别设备偶发丢包）；数据不足以下结论时说明还需要什么信息。
+6. 先核实再下结论：说某台设备“现在离线/不通”前用 ping_now 实测；ping 不通时用 tcp_check 或 arp_lookup 区分“真离线”和“禁 ping”；归因到端口、网线、双工、拥塞或交换机重启前，用 get_switch_ports 找证据（未配置 SNMP 时说明无法核实）。能用工具核实的，不要只凭推测。`
 }
 
 func (s *Server) aiClient(c config.Config) *llm.Client {
@@ -168,10 +177,64 @@ func keyHint(k string) string {
 func aiSettingsView(a config.AIConfig) map[string]interface{} {
 	return map[string]interface{}{
 		"enabled": a.Enabled, "base_url": a.BaseURL, "model": a.Model, "thinking": a.Thinking,
-		"proxy_url": a.ProxyURL, "timeout_sec": a.TimeoutSec,
+		"proxy_url": a.ProxyURL, "timeout_sec": a.TimeoutSec, "self_check": a.SelfCheckOn(),
 		"api_key_set": a.APIKey != "", "api_key_hint": keyHint(a.APIKey),
 		"ready": a.Enabled && a.APIKey != "",
 	}
+}
+
+// aiPublicSettings 供 MCP get_settings 返回的 AI 设置（不含 API Key 与代理）。
+func aiPublicSettings(a config.AIConfig) map[string]interface{} {
+	return map[string]interface{}{
+		"enabled": a.Enabled, "model": a.Model, "base_url": a.BaseURL, "thinking": a.Thinking,
+		"self_check": a.SelfCheckOn(), "timeout_sec": a.TimeoutSec, "api_key_set": a.APIKey != "",
+	}
+}
+
+// toolSetAISettings MCP 修改 AI 诊断设置；API Key、接口地址、代理不允许通过 MCP 修改（防止把 Key 发往别的地址）。
+func toolSetAISettings(s *Server, a map[string]json.RawMessage, remote string) (interface{}, error) {
+	for _, k := range []string{"api_key", "base_url", "proxy_url", "clear_key"} {
+		if _, ok := a[k]; ok {
+			return nil, fmt.Errorf("不能通过 MCP 修改 %s，请在网页「AI 诊断」页修改", k)
+		}
+	}
+	var changed []string
+	c, err := s.updateConfig(func(c *config.Config) error {
+		ai := &c.AI
+		if v, ok := argBool(a, "enabled"); ok {
+			ai.Enabled = v
+			changed = append(changed, "enabled")
+		}
+		if v, ok := argBool(a, "thinking"); ok {
+			ai.Thinking = v
+			changed = append(changed, "thinking")
+		}
+		if v, ok := argBool(a, "self_check"); ok {
+			ai.SelfCheck = &v
+			changed = append(changed, "self_check")
+		}
+		if m := strings.TrimSpace(argStr(a, "model")); m != "" {
+			ai.Model = m
+			changed = append(changed, "model")
+		}
+		if _, ok := a["timeout_sec"]; ok {
+			v := argInt(a, "timeout_sec", 0)
+			if v < 10 || v > 600 {
+				return fmt.Errorf("timeout_sec 必须在 10~600 之间")
+			}
+			ai.TimeoutSec = v
+			changed = append(changed, "timeout_sec")
+		}
+		if len(changed) == 0 {
+			return fmt.Errorf("没有要修改的字段（可选 enabled、thinking、self_check、model、timeout_sec）")
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("MCP(%s) 修改 AI 诊断设置：%s", remote, strings.Join(changed, "、"))
+	return map[string]interface{}{"ok": true, "changed": changed, "ai": aiPublicSettings(c.AI)}, nil
 }
 
 func (s *Server) handleAISettings(w http.ResponseWriter, r *http.Request) error {
@@ -182,6 +245,7 @@ func (s *Server) handleAISettings(w http.ResponseWriter, r *http.Request) error 
 		Thinking   *bool   `json:"thinking"`
 		ProxyURL   *string `json:"proxy_url"`
 		TimeoutSec *int    `json:"timeout_sec"`
+		SelfCheck  *bool   `json:"self_check"`
 		APIKey     string  `json:"api_key"`   // 非空时替换
 		ClearKey   bool    `json:"clear_key"` // 清除已保存的 Key
 	}
@@ -207,6 +271,10 @@ func (s *Server) handleAISettings(w http.ResponseWriter, r *http.Request) error 
 	}
 	if req.TimeoutSec != nil {
 		a.TimeoutSec = *req.TimeoutSec
+	}
+	if req.SelfCheck != nil {
+		v := *req.SelfCheck
+		a.SelfCheck = &v
 	}
 	if k := strings.TrimSpace(req.APIKey); k != "" {
 		a.APIKey = k
@@ -322,14 +390,26 @@ func (s *Server) handleAIDiagnose(w http.ResponseWriter, r *http.Request) error 
 		return nil
 	}
 	calls, total := res.Calls, res.Usage
+	review := "off"
+	if c.AI.SelfCheckOn() {
+		rv := s.aiSelfCheck(ctx, c, res, remote, emit)
+		calls += rv.Calls
+		total.Add(rv.Usage)
+		review = rv.Result
+		if errors.Is(ctx.Err(), context.Canceled) {
+			log.Printf("AI 诊断已取消（%s）：%s", clientAddr(r), question)
+			return nil
+		}
+	}
 	ms := time.Since(start).Milliseconds()
-	log.Printf("AI 诊断（%s，%s）：%s —— 工具 %d 次，%d tokens，%.1f 秒", clientAddr(r), c.AI.Model, question, calls, total.TotalTokens, float64(ms)/1000)
-	emit(map[string]interface{}{"t": "done", "usage": total, "tools": calls, "ms": ms, "model": c.AI.Model})
+	log.Printf("AI 诊断（%s，%s）：%s —— 工具 %d 次，%d tokens，%.1f 秒，自检 %s", clientAddr(r), c.AI.Model, question, calls, total.TotalTokens, float64(ms)/1000, reviewText[review])
+	emit(map[string]interface{}{"t": "done", "usage": total, "tools": calls, "ms": ms, "model": c.AI.Model, "review": review})
 	return nil
 }
 
 type aiRunResult struct {
-	Final string // 最后一轮（不再调用工具）的回复
+	Final string        // 最后一轮（不再调用工具）的回复
+	Msgs  []llm.Message // 最后一轮之前的完整对话（含工具调用与结果），供自检继续使用
 	Calls int
 	Usage llm.Usage
 }
@@ -360,16 +440,27 @@ func (s *Server) aiLoop(ctx context.Context, c config.Config, msgs []llm.Message
 			return res, err
 		}
 		if len(msg.ToolCalls) == 0 || useTools == nil {
-			res.Final = msg.Content
+			res.Final, res.Msgs = msg.Content, msgs
 			return res, nil
 		}
 		msgs = append(msgs, msg)
-		for _, tc := range msg.ToolCalls {
-			res.Calls++
-			title, result := s.runAITool(tc.Function.Name, tc.Function.Arguments, remote)
-			emit(map[string]interface{}{"t": "tool", "name": tc.Function.Name, "title": title, "args": truncRunes(tc.Function.Arguments, 300)})
-			msgs = append(msgs, llm.Message{Role: "tool", ToolCallID: tc.ID, Content: result})
-		}
+		res.Calls += len(msg.ToolCalls)
+		msgs = append(msgs, s.aiExecCalls(msg.ToolCalls, remote, "", emit)...)
 		emit(map[string]interface{}{"t": "break"})
 	}
+}
+
+// aiExecCalls 执行一轮工具调用，返回对应的 tool 消息；phase 非空时附加在 tool 事件上（如自检阶段的 "review"）。
+func (s *Server) aiExecCalls(calls []llm.ToolCall, remote, phase string, emit func(map[string]interface{})) []llm.Message {
+	out := make([]llm.Message, 0, len(calls))
+	for _, tc := range calls {
+		title, result := s.runAITool(tc.Function.Name, tc.Function.Arguments, remote)
+		ev := map[string]interface{}{"t": "tool", "name": tc.Function.Name, "title": title, "args": truncRunes(tc.Function.Arguments, 300)}
+		if phase != "" {
+			ev["phase"] = phase
+		}
+		emit(ev)
+		out = append(out, llm.Message{Role: "tool", ToolCallID: tc.ID, Content: result})
+	}
+	return out
 }
