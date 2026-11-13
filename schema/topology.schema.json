@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://netping.local/schema/topology.schema.json",
+  "title": "netPing topology.yaml",
+  "description": "netPing 机房拓扑文件：交换机、交换机间链路、终端节点及其接线位置。YAML 与 JSON 结构相同。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["site"],
+  "properties": {
+    "version": { "type": "integer", "const": 1, "description": "文件格式版本，固定为 1" },
+    "site": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "机房/网段信息",
+      "properties": {
+        "name": { "type": "string", "description": "机房名称，显示在网页标题和告警消息中" },
+        "subnet": { "type": "string", "description": "网段，如 192.168.101.0/24" },
+        "gateway": { "type": "string", "format": "ipv4", "description": "默认网关 IP，用于顶栏显示网关延迟" },
+        "description": { "type": "string" }
+      }
+    },
+    "switches": {
+      "type": "array",
+      "description": "交换机列表。有 ip 时交换机本身也会被 ping 监控。",
+      "items": { "$ref": "#/$defs/switch" }
+    },
+    "links": {
+      "type": "array",
+      "description": "交换机之间的连线。from 为上游（靠近核心），to 为下游；告警时据此判断下游交换机故障。",
+      "items": { "$ref": "#/$defs/link" }
+    },
+    "nodes": {
+      "type": "array",
+      "description": "终端节点",
+      "items": { "$ref": "#/$defs/node" }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$",
+      "description": "全局唯一标识（交换机/链路/节点之间也不能重复）。可留空由程序生成；节点 id 是历史数据目录名，修改会丢失历史曲线。"
+    },
+    "position": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["x", "y"],
+      "description": "拓扑图坐标；为空表示自动排布",
+      "properties": { "x": { "type": "number" }, "y": { "type": "number" } }
+    },
+    "endpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "switch": { "type": "string", "description": "交换机 id；节点 attach 中为空表示未定位" },
+        "port": { "type": "string", "description": "端口名，如 Gi0/1、Te0/29、12（纯数字请加引号）" }
+      }
+    },
+    "monitor": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "监控参数，省略的字段继承 config.yaml 中 ping 的默认值",
+      "properties": {
+        "enabled": { "type": "boolean", "default": true, "description": "是否 ping 监控" },
+        "alert": { "type": "boolean", "default": false, "description": "是否推送企业微信告警；默认不告警，需要告警的设备显式设为 true" },
+        "interval_ms": { "type": "integer", "minimum": 200, "description": "ping 间隔毫秒" },
+        "timeout_ms": { "type": "integer", "minimum": 1, "description": "超时毫秒" },
+        "latency_warn_ms": { "type": "integer", "minimum": 1, "description": "1 分钟平均延迟告警阈值" },
+        "loss_warn_pct": { "type": "number", "exclusiveMinimum": 0, "maximum": 100, "description": "1 分钟丢包率告警阈值（%）" }
+      }
+    },
+    "switch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "name": { "type": "string" },
+        "role": { "enum": ["core", "aggregation", "access", "other"], "default": "access" },
+        "layer": { "type": "string", "description": "L2 / L3，仅展示" },
+        "vendor": { "type": "string" },
+        "model": { "type": "string" },
+        "ip": { "type": "string", "format": "ipv4", "description": "管理 IP，为空则不监控交换机本身" },
+        "mac": { "type": "string" },
+        "location": { "type": "string", "description": "物理位置，如 A01 机柜 U20" },
+        "note": { "type": "string" },
+        "port_locations": { "type": "object", "additionalProperties": { "type": "string" }, "description": "端口 → 物理位置对照（可选）；端口定位时自动填入设备的 location" },
+        "ports": { "type": "array", "items": { "type": "string" }, "description": "端口名列表（可选），用于下拉选择、排序和绘制交换机前面板；Te/XGE/SFP 等开头画成光口，纯数字编号时尾部多出 8 的整数倍的端口画成光口" },
+        "node_side": { "enum": ["left", "right"], "default": "right", "description": "终端卡片画在交换机哪一侧" },
+        "node_columns": { "type": "integer", "minimum": 1, "maximum": 6, "default": 2, "description": "每个端口下卡片列数" },
+        "monitor": { "$ref": "#/$defs/monitor" },
+        "position": { "$ref": "#/$defs/position" }
+      }
+    },
+    "link": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "from": { "$ref": "#/$defs/endpoint" },
+        "to": { "$ref": "#/$defs/endpoint" },
+        "kind": { "enum": ["uplink", "stack", "other"], "default": "uplink" },
+        "note": { "type": "string" }
+      }
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "name": { "type": "string", "description": "显示名，可空（默认显示 IP）" },
+        "hostname": { "type": "string", "description": "主机名，网段扫描自动获得（NetBIOS / mDNS / 反向 DNS），未填 name 时显示它" },
+        "ip": { "type": "string", "format": "ipv4", "description": "IPv4 地址；为空则只登记不监控；同一 IP 只能出现一次" },
+        "mac": { "type": "string", "description": "MAC，大写冒号分隔；网段扫描按 MAC 识别设备并跟踪 IP 变化" },
+        "ip_mode": { "enum": ["", "dhcp", "static"], "description": "IP 分配方式：空=自动跟踪，dhcp=自动获取（自动跟踪），static=固定 IP（锁定不自动修改）" },
+        "vendor": { "type": "string", "description": "厂商（按 MAC 前缀 OUI 判断）" },
+        "attach": { "$ref": "#/$defs/endpoint", "description": "接线位置：交换机 id + 端口" },
+        "location": { "type": "string", "description": "物理位置（机柜 / U 位 / 房间）" },
+        "flags": {
+          "type": "array",
+          "uniqueItems": true,
+          "description": "状态标记",
+          "items": { "enum": ["gateway", "suspect", "unlocated", "arp_only", "jump_host", "no_ipv4", "critical", "discovered"] }
+        },
+        "tags": { "type": "array", "items": { "type": "string" } },
+        "note": { "type": "string" },
+        "monitor": { "$ref": "#/$defs/monitor" },
+        "position": { "$ref": "#/$defs/position" }
+      }
+    }
+  }
+}
