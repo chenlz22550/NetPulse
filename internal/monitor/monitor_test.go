@@ -1,11 +1,55 @@
 package monitor
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
 	"netping/internal/pinger"
 )
+
+func TestIntervalChangePreservesHistory(t *testing.T) {
+	m := New(nil, nil)
+	defer m.Close()
+	target := Target{ID: "x", Interval: 10 * time.Second, LatencyWarnMs: 100, LossWarnPct: 20}
+	w := newWorker(target, m)
+	base := time.Now().Add(-2 * time.Hour)
+	// 先让环形缓冲绕回起点，验证扩容时不会打乱样本顺序。
+	for i := 0; i < 400; i++ {
+		w.record(base.Add(time.Duration(i)*10*time.Second), pinger.Result{OK: true, RTT: time.Millisecond})
+	}
+	before := w.recent(0)
+	target.Interval = time.Second
+	w.setTarget(target)
+	if got := w.recent(0); !reflect.DeepEqual(got, before) {
+		t.Fatal("resizing lost or reordered existing samples")
+	}
+	start := base.Add(4000 * time.Second)
+	for i := 0; i < 3600; i++ {
+		w.record(start.Add(time.Duration(i)*time.Second), pinger.Result{OK: i%2 == 0, RTT: 2 * time.Millisecond})
+	}
+	samples := w.recent(start.UnixMilli())
+	if len(samples) != 3600 {
+		t.Fatalf("one-hour history has %d samples, want 3600", len(samples))
+	}
+	for i, sample := range samples {
+		if sample.T != start.Add(time.Duration(i)*time.Second).UnixMilli() {
+			t.Fatalf("sample %d out of order", i)
+		}
+	}
+	w.mu.Lock()
+	st := w.computeLocked(start.Add(time.Hour).UnixMilli(), false)
+	w.mu.Unlock()
+	if st.Loss1h != 50 || st.Avg1h != 2 {
+		t.Fatalf("one-hour stats: loss=%v avg=%v", st.Loss1h, st.Avg1h)
+	}
+	before = w.recent(0)
+	target.Interval = time.Minute
+	w.setTarget(target)
+	if got := w.recent(0); !reflect.DeepEqual(got, before) {
+		t.Fatal("slower sampling discarded existing history")
+	}
+}
 
 func TestStatsAndClassify(t *testing.T) {
 	m := New(nil, func() int { return 3 })

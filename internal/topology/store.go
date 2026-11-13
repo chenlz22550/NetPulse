@@ -22,6 +22,7 @@ var fileHeader string
 
 // Store 管理 topology.yaml：加载、校验、修改、保存，并通知订阅者。
 type Store struct {
+	notifyMu  sync.Mutex // 串行执行回调，并在轮到本次通知时读取最新快照。
 	mu        sync.RWMutex
 	path      string
 	topo      *Topology
@@ -113,7 +114,8 @@ func (s *Store) Rev() int64 {
 	return s.rev
 }
 
-// OnChange 注册变更回调（在修改后异步调用）。
+// OnChange 注册变更回调（修改后同步调用，各次通知串行执行）。
+// 回调可以读取 Store，但不能再次修改 Store，以免递归通知导致死锁。
 func (s *Store) OnChange(fn func(*Topology)) {
 	s.mu.Lock()
 	s.listeners = append(s.listeners, fn)
@@ -201,6 +203,8 @@ func (s *Store) saveLocked() error {
 }
 
 func (s *Store) notify() {
+	s.notifyMu.Lock()
+	defer s.notifyMu.Unlock()
 	s.mu.RLock()
 	t := s.topo.Clone()
 	ls := append([]func(*Topology){}, s.listeners...)

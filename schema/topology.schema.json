@@ -108,6 +108,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "locked": { "type": "boolean", "default": false, "description": "上锁保护，true 时不参与一键清理；不影响监控、扫描和手动编辑" },
         "id": { "$ref": "#/$defs/id" },
         "name": { "type": "string", "description": "显示名，可空（默认显示 IP）" },
         "hostname": { "type": "string", "description": "主机名，网段扫描自动获得（NetBIOS / mDNS / 反向 DNS），未填 name 时显示它" },

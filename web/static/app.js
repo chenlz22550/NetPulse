@@ -504,7 +504,7 @@
 
     async function ask(question, focus) {
       if (busy) return;
-      if (!settings || !settings.ready) { toast('请先在右侧设置 API Key', true); $('#aiSet [name=api_key]').focus(); return; }
+      if (!settings || !settings.ready) { toast('请先在右侧设置 API Key', true); $('#aiKeyUnlock, #aiSet [name=api_key]')?.focus(); return; }
       const history = chat.filter(m => !m.error && m.content).map(m => ({ role: m.role, content: m.content }));
       chat.push({ role: 'user', content: question });
       const bot = { role: 'assistant', content: '', tools: [], status: '正在连接…' };
@@ -589,7 +589,7 @@
         <div class="checks" style="margin-bottom:8px"><label><input type="checkbox" name="enabled" ${a.enabled ? 'checked' : ''}> 启用 AI 诊断</label>
           <label title="更慢、更贵，复杂问题时可开启"><input type="checkbox" name="thinking" ${a.thinking ? 'checked' : ''}> 深度思考</label></div>
         <label class="f"><span>API Key${a.api_key_set ? `（已设置 ${esc(a.api_key_hint)}，留空不修改）` : ''}</span>
-          <input type="password" name="api_key" autocomplete="off" placeholder="${a.api_key_set ? '留空保持不变' : 'sk-...'}"></label>
+          <button class="btn ai-key-unlock" type="button" id="aiKeyUnlock">${a.api_key_set ? '点击修改 API Key' : '点击填写 API Key'}</button></label>
         <div class="row2">
           <label class="f"><span>模型</span><input type="text" name="model" value="${esc(a.model)}"></label>
           <label class="f"><span>超时（秒）</span><input type="number" name="timeout_sec" min="10" max="600" value="${a.timeout_sec}"></label>
@@ -600,8 +600,21 @@
           ${a.api_key_set ? '<button class="btn danger" type="button" id="aiClrKey">清除 Key</button>' : ''}</div>
         <div class="help" id="aiTestMsg">默认使用 DeepSeek（deepseek-flash）。Key 保存在 config.yaml，网页和 MCP 都不会把它返回。</div>`;
       const f = $('#aiSet');
+      // 未主动解锁前不创建密码框，也不提交 api_key，避免密码管理器自动填充覆盖已保存的 Key。
+      let keyInput = null;
+      $('#aiKeyUnlock').onclick = ev => {
+        keyInput = document.createElement('input');
+        keyInput.type = 'password';
+        keyInput.name = 'api_key';
+        keyInput.autocomplete = 'new-password';
+        keyInput.spellcheck = false;
+        keyInput.placeholder = a.api_key_set ? '留空保持不变' : 'sk-...';
+        ev.currentTarget.replaceWith(keyInput);
+        keyInput.focus();
+      };
       const body = () => ({
-        enabled: f.elements.enabled.checked, thinking: f.elements.thinking.checked, api_key: f.elements.api_key.value.trim(),
+        enabled: f.elements.enabled.checked, thinking: f.elements.thinking.checked,
+        ...(keyInput ? { api_key: keyInput.value.trim() } : {}),
         model: f.elements.model.value.trim(), timeout_sec: parseInt(f.elements.timeout_sec.value, 10) || 120,
         base_url: f.elements.base_url.value.trim(), proxy_url: f.elements.proxy_url.value.trim(),
       });
@@ -952,6 +965,7 @@
         <label class="f"><span>标记</span></label><div class="checks" style="margin:-4px 0 8px">${flagChecks}</div>
         <label class="f"><span>标签（逗号分隔）</span><input type="text" name="tags" value="${esc((n.tags || []).join(', '))}"></label>
         <label class="f"><span>备注</span><textarea name="note" rows="2">${esc(n.note || '')}</textarea></label>
+        <div class="checks"><label><input type="checkbox" name="locked" ${n.locked ? 'checked' : ''}> 上锁保护（不参与一键清理）</label></div>
         ${monFields(n.monitor, pingDefaults)}
         <div class="btns">
           <button class="btn primary" type="submit">${isNew ? '添加' : '保存'}</button>
@@ -1034,7 +1048,7 @@
       const body = {
         id: e.id.value.trim(), ip: e.ip.value.trim(), mac: e.mac.value.trim(), name: e.name.value.trim(), hostname: n.hostname || '', vendor: e.vendor.value.trim(), ip_mode: e.ip_mode.value,
         attach: { switch: e.sw.value, port: e.sw.value ? e.port.value.trim() : '' },
-        location: e.location.value.trim(), note: e.note.value.trim(),
+        location: e.location.value.trim(), note: e.note.value.trim(), locked: e.locked.checked,
         flags: $$('input[name=flag]:checked', f).map(x => x.value),
         tags: e.tags.value.split(/[,，]/).map(s => s.trim()).filter(Boolean),
         monitor: readMon(f),
@@ -1195,6 +1209,7 @@
         <input type="search" id="lq" placeholder="筛选 IP / MAC / 厂商 / 位置" value="${esc(S.listFilter)}">
         <select id="ls"><option value="">全部状态</option>${Object.keys(STATE_TXT).map(k => `<option value="${k}" ${S.listState === k ? 'selected' : ''}>${STATE_TXT[k]}</option>`).join('')}<option value="abn" ${S.listState === 'abn' ? 'selected' : ''}>异常（离线/丢包/延迟）</option></select>
         <span class="muted" id="lcnt"></span>
+        <button class="btn small danger" id="lCleanup">一键清理无效设备</button>
         <span style="margin-left:auto" class="muted" id="lalert"></span>
         <button class="btn small" id="bulkOn" title="对当前筛选出的所有可监控设备开启告警">筛选结果开启告警</button>
         <button class="btn small" id="bulkOff">筛选结果关闭告警</button>
@@ -1203,8 +1218,18 @@
         <th data-k="state">状态</th><th data-k="ip">IP</th><th data-k="vendor">名称 / 厂商</th><th data-k="loc">接线位置</th>
         <th data-k="last" class="num">当前</th><th data-k="avg1" class="num">1m 平均</th><th data-k="jit" class="num">抖动</th>
         <th data-k="l1" class="num">1m 丢包</th><th data-k="l5" class="num">5m 丢包</th><th data-k="l60" class="num">1h 丢包</th>
-        <th>最近 60 次</th><th data-k="since" class="num">状态持续</th><th data-k="alert" title="是否推送企业微信告警">告警</th>
+        <th>最近 60 次</th><th data-k="since" class="num">状态持续</th><th data-k="alert" title="是否推送企业微信告警">告警</th><th title="上锁后不参与一键清理">上锁保护</th>
       </tr></thead><tbody id="lbody"></tbody></table>
+      <dialog id="lCleanupDialog" class="cleanup-dialog">
+        <div class="ph">清理无效设备</div>
+        <div class="pb">
+          <p class="help">清理全部终端中无 IP 或明确关闭监控的设备，不受列表筛选影响。已上锁设备和交换机始终保留；历史数据保留到过期。扫描任务以后仍可能重新发现并添加设备。</p>
+          <p id="lCleanupSummary"></p>
+          <div class="cleanup-items"><table class="grid"><thead><tr><th>设备</th><th>IP</th><th>清理原因</th></tr></thead><tbody id="lCleanupItems"></tbody></table></div>
+          <div class="btns"><button type="button" class="btn danger" id="lCleanupConfirm">确认清理</button><button type="button" class="btn" id="lCleanupCancel">取消</button></div>
+          <div class="help" id="lCleanupError" role="alert"></div>
+        </div>
+      </dialog>
     </div>`;
     $('#lq').oninput = e => { S.listFilter = e.target.value.trim().toLowerCase(); draw(); };
     $('#ls').onchange = e => { S.listState = e.target.value; draw(); };
@@ -1219,7 +1244,7 @@
       if (!S.topo) return [];
       const out = [];
       S.topo.switches.forEach(s => { if (s.ip) out.push({ id: s.id, ip: s.ip, name: s.name, vendor: s.vendor, loc: '交换机', mac: s.mac, sw: true, alert: !!(s.monitor && s.monitor.alert) }); });
-      S.topo.nodes.forEach(n => out.push({ id: n.id, ip: n.ip, name: n.name || n.hostname, vendor: n.vendor, loc: attachLabel(n), mac: n.mac, flags: n.flags, alert: !!(n.monitor && n.monitor.alert) }));
+      S.topo.nodes.forEach(n => out.push({ id: n.id, ip: n.ip, name: n.name || n.hostname, vendor: n.vendor, loc: attachLabel(n), mac: n.mac, flags: n.flags, locked: !!n.locked, alert: !!(n.monitor && n.monitor.alert) }));
       return out;
     }
     function draw() {
@@ -1257,8 +1282,9 @@
       $('#lalert').textContent = `已开告警 ${on} 台`;
       $('#lbody').innerHTML = list.map(r => {
         const st = r.st;
+        const lock = r.sw ? '<td class="muted">始终保留</td>' : `<td class="lock-cell"><label title="${r.locked ? '已上锁，不参与一键清理' : '上锁后不参与一键清理'}"><input type="checkbox" data-lock="${esc(r.id)}" ${r.locked ? 'checked' : ''}> ${r.locked ? '已上锁' : '上锁'}</label></td>`;
         if (!st) {
-          return `<tr data-id="${esc(r.id)}"><td>${stateBadge('disabled')}</td><td class="mono">${esc(r.ip || '无 IPv4')}</td><td>${esc(r.name || r.vendor || '')}</td><td>${esc(r.loc)}</td><td colspan="8" class="muted">${r.ip ? '未启用监控' : '无 IP，仅登记'}</td><td></td></tr>`;
+          return `<tr data-id="${esc(r.id)}"><td>${stateBadge('disabled')}</td><td class="mono">${esc(r.ip || '无 IPv4')}</td><td>${esc(r.name || r.vendor || '')}</td><td>${esc(r.loc)}</td><td colspan="8" class="muted">${r.ip ? '未启用监控' : '无 IP，仅登记'}</td><td></td>${lock}</tr>`;
         }
         const warn = st.latency_warn_ms;
         return `<tr data-id="${esc(r.id)}">
@@ -1274,7 +1300,7 @@
           <td class="num ${lossCls(st.loss_1h, st.loss_warn_pct)}">${pct(st.loss_1h)}</td>
           <td>${Charts.spark(st.spark, 130, 20, warn)}</td>
           <td class="num">${fmtAgo(st.state_since)}</td>
-          <td class="alert-cell"><label><input type="checkbox" data-alert="${esc(r.id)}" ${r.alert ? 'checked' : ''}></label></td></tr>`;
+          <td class="alert-cell"><label><input type="checkbox" data-alert="${esc(r.id)}" ${r.alert ? 'checked' : ''}></label></td>${lock}</tr>`;
       }).join('');
     }
     let lastList = [];
@@ -1286,6 +1312,9 @@
       } catch (e) { toast(errMsg(e), true); }
     }
     $('#lbody').onclick = e => {
+      const lock = e.target.closest('input[data-lock]');
+      if (lock) { setLocked(lock); return; }
+      if (e.target.closest('.lock-cell')) return;
       const cb = e.target.closest('input[data-alert]');
       if (cb) { setAlert([cb.dataset.alert], cb.checked); return; }
       if (e.target.closest('.alert-cell')) return;
@@ -1300,6 +1329,50 @@
     };
     $('#bulkOn').onclick = () => bulk(true);
     $('#bulkOff').onclick = () => bulk(false);
+    async function setLocked(cb) {
+      cb.disabled = true;
+      try {
+        await api('PUT', 'api/nodes/' + encodeURIComponent(cb.dataset.lock) + '/lock', { locked: cb.checked });
+        toast(cb.checked ? '已上锁，一键清理会保留此设备' : '已解除上锁');
+        await loadTopology().catch(e => toast('上锁设置已保存，列表刷新失败：' + errMsg(e), true));
+      } catch (e) { cb.checked = !cb.checked; toast(errMsg(e), true); }
+      finally { cb.disabled = false; }
+    }
+    const cleanupDialog = $('#lCleanupDialog');
+    let cleanupIDs = [], cleaning = false;
+    $('#lCleanup').onclick = async ev => {
+      const button = ev.currentTarget;
+      button.disabled = true;
+      try {
+        const preview = await api('GET', 'api/nodes/cleanup');
+        cleanupIDs = preview.items.map(n => n.id);
+        $('#lCleanupSummary').textContent = `待清理 ${cleanupIDs.length} 台，已上锁保护 ${preview.protected} 台。请确认以下清单：`;
+        $('#lCleanupItems').innerHTML = preview.items.map(n => `<tr><td>${esc(n.name)}</td><td class="mono">${esc(n.ip || '无 IP')}</td><td>${esc(n.reason)}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">没有需要清理的设备</td></tr>';
+        $('#lCleanupConfirm').disabled = !cleanupIDs.length;
+        $('#lCleanupConfirm').textContent = cleanupIDs.length ? `确认清理 ${cleanupIDs.length} 台` : '确认清理';
+        $('#lCleanupError').textContent = '';
+        cleanupDialog.showModal();
+      } catch (e) { toast(errMsg(e), true); }
+      finally { button.disabled = false; }
+    };
+    $('#lCleanupCancel').onclick = () => cleanupDialog.close();
+    cleanupDialog.oncancel = ev => { if (cleaning) ev.preventDefault(); };
+    $('#lCleanupConfirm').onclick = async () => {
+      cleaning = true;
+      $('#lCleanupConfirm').disabled = true;
+      $('#lCleanupCancel').disabled = true;
+      try {
+        const result = await api('POST', 'api/nodes/cleanup', { ids: cleanupIDs });
+        cleanupDialog.close();
+        toast(`已清理 ${result.changed} 台设备${result.skipped ? `，${result.skipped} 台已变化或受保护，予以保留` : ''}`);
+        await loadTopology().catch(e => toast('清理已完成，列表刷新失败：' + errMsg(e), true));
+      } catch (e) { $('#lCleanupError').textContent = errMsg(e); }
+      finally {
+        cleaning = false;
+        $('#lCleanupConfirm').disabled = !cleanupIDs.length;
+        $('#lCleanupCancel').disabled = false;
+      }
+    };
     // 告警复选框被重绘会丢失点击，悬停在列表上时降低刷新频率
     let hover = false;
     $('#lbody').onmouseenter = () => { hover = true; };
@@ -1730,7 +1803,10 @@
         },
         workbuddy: {
           name: 'WorkBuddy', note: 'WorkBuddy：「连接」→「自定义连接」→ 右上角「配置 MCP」，会打开 ~/.workbuddy/mcp.json（Windows 为 %USERPROFILE%\\.workbuddy\\mcp.json）。已有 mcpServers 时只把 netping 这一项合并进去，保存后新开一个会话即可使用。',
-          code: `{\n  "mcpServers": {\n    "netping": {\n      "type": "http",\n      "url": "${url}"${hdrJSON}\n    }\n  }\n}`,
+          code: JSON.stringify({ mcpServers: { netping: {
+            type: 'http', url: endpoint,
+            ...(auth ? { headers: { Authorization: auth } } : {}),
+          } } }, null, 2),
         },
         vscode: {
           name: 'VS Code', note: 'GitHub Copilot 代理模式：项目内 .vscode/mcp.json，或命令面板「MCP: Add Server」选择 HTTP。',
@@ -1752,11 +1828,36 @@
       $('#mTabs').innerHTML = Object.keys(T).map(k => `<button class="chip${k === tab ? ' on' : ''}" data-t="${k}">${T[k].name}</button>`).join('');
       $$('#mTabs .chip').forEach(b => b.onclick = () => { tab = b.dataset.t; sessionStorage.setItem('np_mcp_tab', tab); drawCfg(); });
       const t = T[tab];
+      const workbuddy = tab === 'workbuddy';
+      const needsToken = !(cfg && cfg.mcp.token);
+      const needsEnable = cfg && !cfg.mcp.enabled;
+      const copyLabel = workbuddy
+        ? (needsEnable ? '启用 MCP 并复制配置' : needsToken ? '生成令牌并复制配置' : '复制配置')
+        : '复制';
       $('#mCfg').innerHTML = `<div class="help">${t.note}</div>
-        <div class="codebox"><button class="btn small" id="mCopyCode">复制</button><pre id="mCode">${esc(t.code)}</pre></div>
-        ${!(cfg && cfg.mcp.token) ? '<div class="help" style="color:var(--down)">还没有设置访问令牌：管理页面需要登录，AI 客户端按上面的配置会连不上。请在左侧「访问令牌」点「生成」并保存，这里的配置会自动带上令牌。</div>' : ''}
-        ${local && tab !== 'claude' ? '<div class="help">请把 &lt;服务器IP&gt; 替换为运行 netPing 的电脑的 IP；AI 客户端就在本机时也可以用 127.0.0.1。</div>' : ''}`;
-      $('#mCopyCode').onclick = () => copyText(t.code);
+        <div class="codebox"><button class="btn small" id="mCopyCode">${copyLabel}</button><pre id="mCode">${esc(t.code)}</pre></div>
+        ${workbuddy ? `<div class="help">配置使用当前访问地址，可直接粘贴到 WorkBuddy。${needsEnable ? '点击按钮将启用 MCP 接口。' : ''}${needsToken ? '点击按钮将生成并保存访问令牌，复制的配置会自动带上认证信息。' : '已包含访问令牌。'}${local ? '适用于本机 WorkBuddy；其他电脑请通过服务器局域网 IP 打开本页后再复制。' : ''}</div>` : needsToken ? '<div class="help" style="color:var(--down)">还没有设置访问令牌：管理页面需要登录，AI 客户端按上面的配置会连不上。请在左侧「访问令牌」点「生成」并保存，这里的配置会自动带上令牌。</div>' : ''}
+        ${local && tab !== 'claude' && !workbuddy ? '<div class="help">请把 &lt;服务器IP&gt; 替换为运行 netPing 的电脑的 IP；AI 客户端就在本机时也可以用 127.0.0.1。</div>' : ''}`;
+      $('#mCopyCode').onclick = async ev => {
+        if (!workbuddy) { await copyText(t.code); return; }
+        const button = ev.currentTarget;
+        button.disabled = true;
+        try {
+          const current = await api('GET', 'api/config');
+          if (!current.mcp.token || !current.mcp.enabled) {
+            if (!current.mcp.token) current.mcp.token = generateToken();
+            current.mcp.enabled = true;
+            await api('PUT', 'api/config', current);
+          }
+          await load();
+          await copyText(snippets().workbuddy.code);
+        } catch (e) { toast('配置未复制：' + errMsg(e), true); }
+        finally { button.disabled = false; }
+      };
+    }
+    function generateToken() {
+      const b = new Uint8Array(24); crypto.getRandomValues(b);
+      return 'np_' + Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
     }
     function drawForm() {
       const m = cfg.mcp;
@@ -1771,8 +1872,7 @@
         <div class="btns"><button class="btn primary" type="submit">保存</button></div>`;
       const f = $('#mForm');
       $('#mGen').onclick = () => {
-        const b = new Uint8Array(24); crypto.getRandomValues(b);
-        f.elements.token.value = 'np_' + Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
+        f.elements.token.value = generateToken();
       };
       $('#mClr').onclick = () => { f.elements.token.value = ''; };
       f.onsubmit = async ev => {
@@ -2206,6 +2306,7 @@
   // 端口定位页：SNMP 读取交换机 MAC 地址表，自动确定设备接在哪个端口
   function locatePage(app) {
     let data = null, cfg = null, tableSw = '', busy = false;
+    let closeTerminal = null, alive = true;
     app.innerHTML = `<div class="page pad"><div class="settings">
       <div>
         <div class="panel"><div class="ph">端口定位<span class="r" id="lState"></span></div><div class="pb">
@@ -2216,7 +2317,7 @@
         </div></div>
         <div class="panel"><div class="ph">全局设置</div><div class="pb"><form id="lf"></form></div></div>
         <div class="panel"><div class="ph">交换机上需要的配置（参考）</div><div class="pb">
-          <div class="help" style="margin-top:0">只需开启 SNMP v2c <b>只读</b>团体名；netPing 只读取标准 BRIDGE-MIB / IF-MIB，不会修改交换机配置。建议限制只允许 netPing 服务器访问。</div>
+          <div class="help" style="margin-top:0">自动定位只需开启 SNMP v2c <b>只读</b>团体名，读取标准 BRIDGE-MIB / IF-MIB。需要修改交换机配置时，点右侧「Telnet」手动登录终端。建议限制只允许 netPing 服务器访问。</div>
           <pre class="code">! 锐捷
 snmp-server community 团体名 ro
 ! 华为
@@ -2263,7 +2364,7 @@ snmp-agent community read 团体名</pre></div></div>
           <td><input type="text" name="community" value="${esc(o.community || '')}" placeholder="默认" style="width:90px" autocomplete="off"></td>
           <td><input type="checkbox" name="enabled" ${o.disabled ? '' : 'checked'}></td>
           <td style="font-size:12px">${stat}</td>
-          <td style="white-space:nowrap"><button class="btn small" data-test="${esc(sw.id)}">测试</button> <button class="btn small" data-table="${esc(sw.id)}">MAC 表</button></td></tr>`;
+          <td style="white-space:nowrap"><button class="btn small" data-test="${esc(sw.id)}">测试</button> <button class="btn small" data-table="${esc(sw.id)}">MAC 表</button> <button class="btn small" data-telnet="${esc(sw.id)}">Telnet</button> <button class="btn small" data-ssh="${esc(sw.id)}">SSH</button></td></tr>`;
       }).join('');
       $('#lTblSw').innerHTML = S.topo.switches.map(sw => `<option value="${esc(sw.id)}" ${sw.id === tableSw ? 'selected' : ''}>${esc(sw.name || sw.id)}</option>`).join('');
     }
@@ -2340,6 +2441,7 @@ snmp-agent community read 团体名</pre></div></div>
 
     async function load() {
       [data, cfg] = await Promise.all([api('GET', 'api/locate'), api('GET', 'api/config')]);
+      if (!alive) return;
       if (!tableSw && S.topo.switches.length) tableSw = S.topo.switches[0].id;
       drawSwitches(); drawForm(); drawResult();
     }
@@ -2380,6 +2482,145 @@ snmp-agent community read 团体名</pre></div></div>
       } catch (e) { $('#lTbl').innerHTML = `<div class="pb v-down">${esc(errMsg(e))}</div>`; }
     }
 
+    function openTerminal(id, protocol = 'telnet') {
+      if (closeTerminal) closeTerminal();
+      const isSSH = protocol === 'ssh', title = isSSH ? 'SSH' : 'Telnet';
+      const sw = S.topo.switches.find(s => s.id === id);
+      const host = ((cfg.locate.switches || {})[id] || {}).host || sw.ip;
+      if (!host) { toast('请先保存该交换机的读取地址或管理 IP', true); return; }
+      const dialog = document.createElement('dialog');
+      dialog.className = 'telnet-dialog' + (isSSH ? ' ssh-dialog' : '');
+      dialog.innerHTML = `<div class="ph"><b>${esc(sw.name || id)} · ${title}</b><button class="btn small" data-close>关闭</button></div>
+        <div class="pb"><form class="telnet-toolbar"><span class="mono telnet-host">${esc(host)}</span>
+          <label>端口 <input name="port" type="number" min="1" max="65535" value="${isSSH ? 22 : 23}" required aria-label="${title} 端口"></label>
+          ${isSSH ? `<label>用户名 <input name="username" class="ssh-username" required maxlength="256" autocomplete="off"></label>
+          <label>密码 <input name="password" class="ssh-password" type="password" autocomplete="new-password" maxlength="4096"></label>` : ''}
+          <button class="btn primary" type="submit">连接</button><button class="btn" type="button" data-disconnect disabled>断开</button>
+          <span role="status" data-state>未连接</span></form>
+          <div class="help">由 netPing 服务器连接交换机；${isSSH ? '先填写用户名和密码，首次连接需核对主机指纹。' : '请在终端输入账号和密码。Telnet 使用明文传输。'}账号密码不保存在 netPing。配置修改会直接作用于交换机，按设备要求保存配置。</div>
+          ${isSSH ? `<div class="ssh-hostkey hidden" data-hostkey><b>首次连接：请核对设备主机指纹</b><div class="mono" data-fingerprint></div>
+          <button type="button" class="btn primary" data-trust>信任此主机并继续</button> <button type="button" class="btn" data-reject>取消连接</button></div>` : ''}
+          <div class="telnet-screen" aria-label="交换机交互终端"></div>
+          <div class="btns"><button class="btn small" data-key="enter">回车</button><button class="btn small" data-key="space">空格 / 翻页</button><button class="btn small" data-key="interrupt">Ctrl+C</button><button class="btn small" data-key="exit">Ctrl+Z</button><span class="muted">支持方向键、Tab 补全；关闭窗口会断开连接。</span></div>
+          ${isSSH ? `<form class="ssh-upload"><b>SFTP 文件上传</b><div class="help">设备需启用 SFTP。单个文件最大 1 GiB，默认保留远端同名文件。上传只传送文件，不会自动安装或执行。</div>
+            <div class="ssh-upload-fields"><label class="f"><span>选择文件</span><input type="file" name="file" required></label>
+            <label class="f"><span>远程目录</span><input type="text" name="directory" value="." required placeholder="如 /tmp 或 flash:/"></label></div>
+            <div class="btns"><label><input type="checkbox" name="overwrite"> 覆盖远端同名文件</label><button class="btn primary" type="submit" disabled>上传文件</button><button class="btn" type="button" data-cancel-upload disabled>取消上传</button></div>
+            <progress max="100" value="0" aria-label="上传进度"></progress><div role="status" class="help" data-upload-state>请先连接 SSH。</div>
+          </form>` : ''}
+        </div>`;
+      document.body.appendChild(dialog);
+      dialog.showModal();
+      const term = new Terminal({ cursorBlink: true, fontSize: 14, fontFamily: 'Menlo, Consolas, monospace', scrollback: 3000, allowProposedApi: false });
+      const fit = new FitAddon.FitAddon();
+      term.loadAddon(fit);
+      term.open(dialog.querySelector('.telnet-screen'));
+      let socket = null, disposed = false, sessionID = '', transfer = null, connected = false;
+      const form = dialog.querySelector('form'), port = form.elements.port;
+      const state = dialog.querySelector('[data-state]'), disconnect = dialog.querySelector('[data-disconnect]');
+      const connect = form.querySelector('[type=submit]');
+      const uploadForm = dialog.querySelector('.ssh-upload');
+      const uploadState = dialog.querySelector('[data-upload-state]');
+      const refreshUpload = () => {
+        if (!uploadForm) return;
+        uploadForm.querySelector('[type=submit]').disabled = !sessionID || !!transfer;
+        uploadForm.querySelector('[data-cancel-upload]').disabled = !transfer;
+        ['file', 'directory', 'overwrite'].forEach(name => { uploadForm.elements[name].disabled = !!transfer; });
+      };
+      const setState = (text, active) => {
+        state.textContent = text; disconnect.disabled = !active; port.disabled = active; connect.disabled = active;
+        if (isSSH) { form.elements.username.disabled = active; form.elements.password.disabled = active; }
+      };
+      const send = msg => { if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(msg)); };
+      term.onData(data => { if (connected) send({ type: 'input', data }); });
+      term.onResize(({ cols, rows }) => { if (connected) send({ type: 'resize', cols, rows }); });
+      const resize = new ResizeObserver(() => { if (!disposed) fit.fit(); });
+      resize.observe(dialog.querySelector('.telnet-screen'));
+      const stop = () => {
+        const ws = socket; socket = null;
+        connected = false; sessionID = '';
+        if (transfer) transfer.abort();
+        if (isSSH) { form.elements.password.value = ''; dialog.querySelector('[data-hostkey]').classList.add('hidden'); }
+        refreshUpload();
+        if (ws) { ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null; ws.close(); }
+        setState('已断开', false);
+      };
+      closeTerminal = () => {
+        if (disposed) return;
+        disposed = true; stop(); resize.disconnect(); term.dispose(); dialog.close(); dialog.remove(); closeTerminal = null;
+      };
+      dialog.querySelector('[data-close]').onclick = () => closeTerminal();
+      dialog.addEventListener('cancel', ev => { ev.preventDefault(); closeTerminal(); });
+      disconnect.onclick = () => { stop(); term.writeln('\r\n[已断开连接]'); };
+      const keys = { enter: '\r', space: ' ', interrupt: '\x03', exit: '\x1a' };
+      dialog.querySelectorAll('[data-key]').forEach(b => { b.onclick = () => { if (connected) send({ type: 'input', data: keys[b.dataset.key] }); term.focus(); }; });
+      if (isSSH) {
+        dialog.querySelector('[data-reject]').onclick = stop;
+        uploadForm.querySelector('[data-cancel-upload]').onclick = () => { if (transfer) transfer.abort(); };
+        uploadForm.onsubmit = ev => {
+          ev.preventDefault();
+          const file = uploadForm.elements.file.files[0];
+          if (!file || !sessionID || transfer) return;
+          if (file.size > 1024 ** 3) { uploadState.textContent = '文件超过 1 GiB，请选择较小的文件。'; return; }
+          const url = new URL(`api/locate/ssh-upload/${sessionID}`, document.baseURI);
+          url.searchParams.set('name', file.name); url.searchParams.set('dir', uploadForm.elements.directory.value.trim());
+          url.searchParams.set('overwrite', uploadForm.elements.overwrite.checked ? '1' : '0');
+          const xhr = new XMLHttpRequest(); transfer = xhr;
+          const progress = uploadForm.querySelector('progress'); progress.value = 0;
+          uploadState.textContent = '正在上传…'; refreshUpload();
+          xhr.open('POST', url); xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+          xhr.upload.onprogress = ev => { if (ev.lengthComputable) { progress.value = ev.loaded / ev.total * 100; uploadState.textContent = progress.value >= 100 ? '文件已发送，等待设备确认…' : `正在上传 ${Math.floor(progress.value)}%`; } };
+          xhr.onload = () => {
+            let result = {}; try { result = JSON.parse(xhr.responseText); } catch (_) { /* HTTP error without JSON */ }
+            if (xhr.status >= 200 && xhr.status < 300 && result.ok) { progress.value = 100; uploadState.textContent = `上传完成：${result.path}（${result.bytes} 字节）`; }
+            else uploadState.textContent = result.error || '上传失败，请检查连接、目录及 SFTP 服务后重试。';
+          };
+          xhr.onerror = () => { uploadState.textContent = '上传连接中断，请检查网络及远端文件后重试。'; };
+          xhr.onabort = () => { uploadState.textContent = '已取消上传；远端可能保留部分文件，请检查后重试。'; };
+          xhr.onloadend = () => { transfer = null; refreshUpload(); };
+          xhr.send(file);
+        };
+      }
+      form.onsubmit = ev => {
+        ev.preventDefault();
+        const username = isSSH ? form.elements.username.value.trim() : '';
+        let password = isSSH ? form.elements.password.value : '';
+        stop(); term.reset(); fit.fit();
+        const url = new URL(`api/locate/${protocol}/${encodeURIComponent(id)}`, document.baseURI);
+        url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        url.searchParams.set('port', port.value);
+        const ws = new WebSocket(url); socket = ws; ws.binaryType = 'arraybuffer';
+        setState('连接中…', true);
+        term.writeln(`[正在连接 ${host}:${port.value}…]`);
+        ws.onopen = () => {
+          if (isSSH) { send({ type: 'auth', username, password, cols: term.cols, rows: term.rows }); password = ''; }
+          else send({ type: 'resize', cols: term.cols, rows: term.rows });
+        };
+        ws.onmessage = ev => {
+          if (ev.data instanceof ArrayBuffer) term.write(new Uint8Array(ev.data));
+          else {
+            const msg = JSON.parse(ev.data);
+            if (msg.message) term.writeln(`\r\n[${msg.message}]`);
+            if (msg.type === 'hostkey') {
+              const box = dialog.querySelector('[data-hostkey]'); box.classList.remove('hidden');
+              box.querySelector('[data-fingerprint]').textContent = `${msg.address}\n${msg.fingerprint}`;
+              box.querySelector('[data-trust]').onclick = () => { send({ type: 'trust', fingerprint: msg.fingerprint }); box.classList.add('hidden'); };
+              state.textContent = '等待核对主机指纹';
+            }
+            if (msg.type === 'connected') {
+              connected = true; sessionID = msg.session || ''; setState(msg.message, true); refreshUpload();
+              if (isSSH) uploadState.textContent = '已连接，可选择文件并上传。';
+              send({ type: 'resize', cols: term.cols, rows: term.rows }); term.focus();
+            }
+          }
+        };
+        ws.onerror = () => { term.writeln(`\r\n[连接失败：请检查网页登录状态、已保存的地址、${title} 端口及服务器到交换机的网络，然后点击连接重试。]`); };
+        ws.onclose = () => { password = ''; stop(); term.writeln('\r\n[连接已关闭]'); };
+      };
+      fit.fit();
+      if (isSSH) form.elements.username.focus(); else form.requestSubmit();
+    }
+
     $('#lRun').onclick = () => run(false);
     $('#lDry').onclick = () => run(true);
     $('#lTblLoad').onclick = () => showTable($('#lTblSw').value, true);
@@ -2398,9 +2639,11 @@ snmp-agent community read 团体名</pre></div></div>
         await loadTopology(); await load();
       } catch (e) { toast(errMsg(e), true); }
     };
-    app.addEventListener('click', async ev => {
-      const b = ev.target.closest('[data-test],[data-table],[data-apply]');
+    const onLocateClick = async ev => {
+      const b = ev.target.closest('[data-test],[data-table],[data-apply],[data-telnet],[data-ssh]');
       if (!b) return;
+      if (b.dataset.ssh) { openTerminal(b.dataset.ssh, 'ssh'); return; }
+      if (b.dataset.telnet) { openTerminal(b.dataset.telnet); return; }
       if (b.dataset.table) { showTable(b.dataset.table, true); return; }
       if (b.dataset.apply) {
         try { await api('POST', 'api/locate/apply', { node_id: b.dataset.apply }); toast('已修改接线位置'); await loadTopology(); await load(); }
@@ -2415,9 +2658,10 @@ snmp-agent community read 团体名</pre></div></div>
         toast(`✓ ${r.sys_name || ''}：${r.interfaces} 个接口，MAC 表 ${r.mac_entries} 条${(r.warnings || []).length ? '；' + r.warnings.join('；') : ''}`, !r.mac_entries);
       } catch (e) { toast('测试失败：' + errMsg(e), true); }
       b.disabled = false; b.textContent = '测试';
-    });
+    };
+    app.addEventListener('click', onLocateClick);
     load().catch(e => toast(errMsg(e), true));
-    return {};
+    return { destroy() { alive = false; app.removeEventListener('click', onLocateClick); if (closeTerminal) closeTerminal(); } };
   }
 
   // ---------------------------------------------------------------------------

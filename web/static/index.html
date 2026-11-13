@@ -6,11 +6,12 @@
 <title>netPing 网络监控</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='15' fill='%23ff5a1f'/%3E%3Cpolyline points='4,18 11,18 14,10 18,25 21,14 23,18 28,18' fill='none' stroke='white' stroke-width='2.6'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="vendor/xterm/xterm.css">
 </head>
 <body>
 <header class="top">
   <div class="brand">
-    <div class="logo"><svg width="22" height="22" viewBox="0 0 22 22"><rect x="2" y="3" width="18" height="3" fill="#1a1a1a"/><rect x="9" y="6" width="4" height="10" fill="#1a1a1a"/><rect x="4" y="16" width="14" height="2" fill="#ff5a1f"/></svg></div>
+    <img class="logo" src="logo.webp" alt="netPing 图标" width="40" height="40">
     <div>
       <h1 id="siteTitle">netPing<span class="slash">/</span>网络拓扑</h1>
       <div class="sub" id="siteSub">-</div>
@@ -39,6 +40,8 @@
 <main id="app"></main>
 <script src="charts.js"></script>
 <script src="topology.js"></script>
+<script src="vendor/xterm/xterm.js"></script>
+<script src="vendor/xterm/addon-fit.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

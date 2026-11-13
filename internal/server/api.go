@@ -88,9 +88,16 @@ func (s *Server) handleSite(w http.ResponseWriter, r *http.Request) error {
 // ---- 节点 ----
 
 func (s *Server) handleNodeSave(w http.ResponseWriter, r *http.Request, origID string) error {
-	var n topology.Node
-	if err := decode(r, &n); err != nil {
+	var req struct {
+		topology.Node
+		Locked *bool `json:"locked"`
+	}
+	if err := decode(r, &req); err != nil {
 		return err
+	}
+	n := req.Node
+	if req.Locked != nil {
+		n.Locked = *req.Locked
 	}
 	var savedID string
 	err := s.Topo.Update(func(t *topology.Topology) error {
@@ -104,6 +111,9 @@ func (s *Server) handleNodeSave(w http.ResponseWriter, r *http.Request, origID s
 		}
 		for i, x := range t.Nodes {
 			if x.ID == origID {
+				if req.Locked == nil {
+					n.Locked = x.Locked // 旧客户端未提交该字段时保留锁定状态
+				}
 				if n.ID == "" {
 					n.ID = origID
 				}
