@@ -1,0 +1,462 @@
+# 纯虚构演示数据，切勿用于实际设备识别。
+version: 1
+site:
+  name: 演示机房
+  subnet: 192.168.50.0/24
+  gateway: 192.168.50.1
+  description: 纯虚构演示数据，请替换为自有设备
+switches:
+- id: core
+  name: 示例核心交换机
+  role: core
+  layer: L3
+  vendor: 示例厂商
+  note: 虚构演示交换机
+  ports:
+  - Gi0/1
+  - Gi0/2
+  - Gi0/3
+  - Gi0/4
+  - Gi0/5
+  - Gi0/6
+  - Gi0/7
+  - Gi0/8
+  - Gi0/9
+  - Gi0/10
+  - Gi0/11
+  - Gi0/12
+  - Gi0/13
+  - Gi0/14
+  - Gi0/15
+  - Gi0/16
+  - Gi0/17
+  - Gi0/18
+  - Gi0/19
+  - Gi0/20
+  - Gi0/21
+  - Gi0/22
+  - Gi0/23
+  - Gi0/24
+  node_side: left
+  node_columns: 1
+  position:
+    x: 80
+    y: 80
+- id: access
+  name: 示例接入交换机
+  role: access
+  layer: L2
+  vendor: 示例厂商
+  ip: 192.168.50.2
+  mac: 02:00:00:00:00:17
+  note: 虚构演示交换机
+  ports:
+  - '1'
+  - '2'
+  - '3'
+  - '4'
+  - '5'
+  - '6'
+  - '7'
+  - '8'
+  - '9'
+  - '10'
+  - '11'
+  - '12'
+  - '13'
+  - '14'
+  - '15'
+  - '16'
+  - '17'
+  - '18'
+  - '19'
+  - '20'
+  - '21'
+  - '22'
+  - '23'
+  - '24'
+  - '25'
+  - '26'
+  node_side: right
+  node_columns: 2
+  position:
+    x: 800
+    y: 80
+links:
+- id: demo-uplink
+  from:
+    switch: core
+    port: Gi0/24
+  to:
+    switch: access
+    port: '26'
+  kind: uplink
+nodes:
+- id: n-192-168-50-10
+  ip: 192.168.50.10
+  mac: 02:00:00:00:00:0C
+  vendor: 示例厂商
+  attach:
+    switch: core
+    port: Gi0/1
+  name: 演示终端 01
+- id: n-192-168-50-11
+  ip: 192.168.50.11
+  mac: 02:00:00:00:00:19
+  vendor: 示例厂商
+  attach:
+    switch: core
+    port: Gi0/2
+  name: 演示终端 02
+- id: n-192-168-50-12
+  ip: 192.168.50.12
+  mac: 02:00:00:00:00:21
+  vendor: 示例厂商
+  attach:
+    switch: core
+    port: Gi0/3
+  name: 演示终端 03
+- id: n-192-168-50-13
+  ip: 192.168.50.13
+  mac: 02:00:00:00:00:24
+  vendor: 示例厂商
+  attach:
+    switch: core
+    port: Gi0/4
+  name: 演示终端 04
+- id: n-192-168-50-14
+  ip: 192.168.50.14
+  mac: 02:00:00:00:00:26
+  vendor: 示例厂商
+  attach:
+    switch: core
+    port: Gi0/5
+  name: 演示终端 05
+- id: n-192-168-50-15
+  ip: 192.168.50.15
+  mac: 02:00:00:00:00:29
+  vendor: 示例厂商
+  attach:
+    switch: core
+    port: Gi0/6
+  name: 演示终端 06
+- id: n-192-168-50-16
+  ip: 192.168.50.16
+  mac: 02:00:00:00:00:1C
+  vendor: 示例厂商
+  attach:
+    switch: core
+    port: Gi0/7
+  name: 演示终端 07
+- id: n-192-168-50-17
+  ip: 192.168.50.17
+  mac: 02:00:00:00:00:23
+  vendor: 示例厂商
+  attach:
+    switch: core
+    port: Gi0/8
+  name: 演示终端 08
+- id: n-192-168-50-1
+  ip: 192.168.50.1
+  mac: 02:00:00:00:00:1B
+  vendor: 示例厂商
+  attach:
+    switch: core
+    port: Gi0/11
+  name: 演示终端 09
+  flags:
+  - gateway
+  - critical
+- id: n-192-168-50-19
+  ip: 192.168.50.19
+  mac: 02:00:00:00:00:0F
+  vendor: 示例厂商
+  attach:
+    switch: core
+    port: Gi0/10
+  name: 演示终端 10
+- id: n-192-168-50-20
+  ip: 192.168.50.20
+  mac: 02:00:00:00:00:1E
+  vendor: 示例厂商
+  attach:
+    switch: core
+    port: Gi0/11
+  name: 演示终端 11
+- id: n-192-168-50-21
+  ip: 192.168.50.21
+  mac: 02:00:00:00:00:25
+  vendor: 示例厂商
+  attach:
+    switch: core
+    port: Gi0/12
+  name: 演示终端 12
+- id: n-192-168-50-22
+  ip: 192.168.50.22
+  mac: 02:00:00:00:00:28
+  vendor: 示例厂商
+  attach:
+    switch: core
+    port: Gi0/13
+  name: 演示终端 13
+- id: n-192-168-50-23
+  ip: 192.168.50.23
+  mac: 02:00:00:00:00:1D
+  vendor: 示例厂商
+  attach:
+    switch: core
+    port: Gi0/14
+  name: 演示终端 14
+- id: n-192-168-50-24
+  ip: 192.168.50.24
+  mac: 02:00:00:00:00:0A
+  vendor: 示例厂商
+  attach:
+    switch: core
+    port: Gi0/15
+  name: 演示终端 15
+- id: n-192-168-50-25
+  ip: 192.168.50.25
+  mac: 02:00:00:00:00:09
+  vendor: 示例厂商
+  attach:
+    switch: core
+    port: Gi0/16
+  name: 演示终端 16
+- id: n-192-168-50-26
+  ip: 192.168.50.26
+  mac: 02:00:00:00:00:0B
+  vendor: 示例厂商
+  attach:
+    switch: core
+    port: Gi0/17
+  name: 演示终端 17
+- id: n-192-168-50-27
+  ip: 192.168.50.27
+  mac: 02:00:00:00:00:18
+  vendor: 示例厂商
+  attach:
+    switch: core
+    port: Gi0/18
+  name: 演示终端 18
+- id: n-192-168-50-28
+  ip: 192.168.50.28
+  mac: 02:00:00:00:00:1A
+  vendor: 示例厂商
+  attach:
+    switch: access
+    port: '21'
+  name: 演示终端 19
+- id: n-192-168-50-29
+  ip: 192.168.50.29
+  mac: 02:00:00:00:00:12
+  vendor: 示例厂商
+  attach:
+    switch: access
+    port: '1'
+  name: 演示终端 20
+- id: n-192-168-50-30
+  ip: 192.168.50.30
+  mac: 02:00:00:00:00:08
+  vendor: 示例厂商
+  attach:
+    switch: access
+    port: '1'
+  name: 演示终端 21
+- id: n-192-168-50-31
+  ip: 192.168.50.31
+  mac: 02:00:00:00:00:22
+  vendor: 示例厂商
+  attach:
+    switch: access
+    port: '24'
+  name: 演示终端 22
+- id: n-192-168-50-32
+  ip: 192.168.50.32
+  mac: 02:00:00:00:00:27
+  vendor: 示例厂商
+  attach:
+    switch: access
+    port: '1'
+  name: 演示终端 23
+- id: n-192-168-50-33
+  ip: 192.168.50.33
+  mac: 02:00:00:00:00:0D
+  vendor: 示例厂商
+  attach:
+    switch: access
+    port: '2'
+  name: 演示终端 24
+- id: n-192-168-50-34
+  ip: 192.168.50.34
+  mac: 02:00:00:00:00:16
+  vendor: 示例厂商
+  attach:
+    switch: access
+    port: '3'
+  name: 演示终端 25
+- id: n-192-168-50-35
+  ip: 192.168.50.35
+  mac: 02:00:00:00:00:06
+  vendor: 示例厂商
+  attach:
+    switch: access
+    port: '4'
+  name: 演示终端 26
+- id: n-192-168-50-36
+  ip: 192.168.50.36
+  mac: 02:00:00:00:00:11
+  vendor: 示例厂商
+  attach:
+    switch: access
+    port: '5'
+  name: 演示终端 27
+- id: n-192-168-50-37
+  ip: 192.168.50.37
+  mac: 02:00:00:00:00:14
+  vendor: 示例厂商
+  attach:
+    switch: access
+    port: '6'
+  name: 演示终端 28
+- id: n-192-168-50-38
+  ip: 192.168.50.38
+  mac: 02:00:00:00:00:01
+  vendor: 示例厂商
+  attach:
+    switch: access
+    port: '7'
+  name: 演示终端 29
+- id: n-192-168-50-39
+  ip: 192.168.50.39
+  mac: 02:00:00:00:00:05
+  vendor: 示例厂商
+  attach:
+    switch: access
+    port: '8'
+  name: 演示终端 30
+- id: n-192-168-50-40
+  ip: 192.168.50.40
+  mac: 02:00:00:00:00:2B
+  vendor: 示例厂商
+  attach:
+    switch: access
+    port: '9'
+  name: 演示终端 31
+- id: demo-02000000002a
+  mac: 02:00:00:00:00:2A
+  vendor: 示例厂商
+  attach:
+    switch: access
+    port: '10'
+  monitor:
+    enabled: false
+  name: 演示终端 32
+- id: n-192-168-50-41
+  ip: 192.168.50.41
+  mac: 02:00:00:00:00:0E
+  vendor: 示例厂商
+  attach:
+    switch: access
+    port: '11'
+  name: 演示终端 33
+- id: n-192-168-50-42
+  ip: 192.168.50.42
+  mac: 02:00:00:00:00:15
+  vendor: 示例厂商
+  attach:
+    switch: access
+    port: '12'
+  name: 演示终端 34
+- id: n-192-168-50-43
+  ip: 192.168.50.43
+  mac: 02:00:00:00:00:10
+  vendor: 示例厂商
+  attach:
+    switch: access
+    port: '13'
+  name: 演示终端 35
+- id: n-192-168-50-44
+  ip: 192.168.50.44
+  mac: 02:00:00:00:00:13
+  vendor: 示例厂商
+  attach:
+    switch: access
+    port: '14'
+  name: 演示终端 36
+- id: n-192-168-50-45
+  ip: 192.168.50.45
+  mac: 02:00:00:00:00:03
+  vendor: 示例厂商
+  attach:
+    switch: access
+    port: '15'
+  name: 演示终端 37
+- id: n-192-168-50-46
+  ip: 192.168.50.46
+  mac: 02:00:00:00:00:07
+  vendor: 示例厂商
+  attach:
+    switch: access
+    port: '16'
+  name: 演示终端 38
+- id: n-192-168-50-47
+  ip: 192.168.50.47
+  mac: 02:00:00:00:00:02
+  vendor: 示例厂商
+  attach:
+    switch: access
+    port: '17'
+  name: 演示终端 39
+- id: n-192-168-50-48
+  ip: 192.168.50.48
+  mac: 02:00:00:00:00:04
+  vendor: 示例厂商
+  attach:
+    switch: access
+    port: '18'
+  name: 演示终端 40
+- id: n-192-168-50-49
+  ip: 192.168.50.49
+  mac: 02:00:00:00:00:20
+  vendor: 示例厂商
+  attach:
+    switch: ''
+    port: ''
+  position:
+    x: 600
+    y: 300
+  name: 演示终端 41
+- id: n-192-168-50-50
+  ip: 192.168.50.50
+  vendor: 示例厂商
+  attach:
+    switch: ''
+    port: ''
+  position:
+    x: 600
+    y: 352
+  name: 演示终端 42
+  mac: 02:00:00:01:00:29
+- id: n-192-168-50-51
+  ip: 192.168.50.51
+  vendor: 示例厂商
+  attach:
+    switch: ''
+    port: ''
+  position:
+    x: 600
+    y: 404
+  name: 演示终端 43
+  mac: 02:00:00:01:00:2A
+- id: n-192-168-50-52
+  ip: 192.168.50.52
+  vendor: 示例厂商
+  attach:
+    switch: ''
+    port: ''
+  position:
+    x: 600
+    y: 456
+  name: 演示终端 44
+  mac: 02:00:00:01:00:2B

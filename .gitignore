@@ -1,0 +1,7 @@
+dist/
+/config.yaml
+/topology.yaml
+/data/
+/logs/
+*.tmp
+.DS_Store

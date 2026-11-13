@@ -1,0 +1,83 @@
+# =============================================================================
+# netPing 拓扑文件 topology.yaml
+# -----------------------------------------------------------------------------
+# 本文件描述一个机房的交换机、交换机间链路和终端节点，是 netPing 的唯一节点数据源。
+# 网页里的增删改、拖动位置都会写回本文件（本说明头会被自动保留）。
+# 也可以直接编辑本文件（或交给 AI 修改），然后在网页「设置 → 从文件重新加载」生效。
+# 完整说明见 docs/topology-fields.md，JSON Schema 见 schema/topology.schema.json。
+#
+# 约定：
+#   - id 全局唯一（交换机、链路、节点之间也不能重复），只能包含 字母 数字 _ . -，
+#     且以字母或数字开头。节点 id 用作历史数据目录名，修改 id 会丢失该节点的历史曲线。
+#     新增条目时 id 可以留空，程序会按 IP 自动生成（如 n-192-168-1-10）。
+#   - IP 只支持 IPv4；同一个 IP 只能出现一次。
+#   - 没有 IP 的节点只做登记、不做 ping 监控。
+#   - position 为空表示由程序按所接端口自动排布；拖动后会写入坐标。
+#   - 所有设备默认只监控、不告警；需要推送企业微信告警的设备设置 monitor.alert: true。
+#   - 全局监控时段在 config.yaml 的 schedule 中设置，时段外暂停 ping 与告警。
+#
+# version: 1                       文件格式版本，目前固定为 1
+# site:                            机房/网段信息
+#   name                           机房名称（显示在网页标题和告警消息中）
+#   subnet                         网段，如 192.168.50.0/24
+#   gateway                        默认网关 IP
+#   description                    备注
+#
+# switches[]:                      交换机列表（有 ip 时交换机本身也会被 ping 监控）
+#   id                             唯一标识，被 links / nodes.attach 引用
+#   name                           显示名
+#   role                           core | aggregation | access | other
+#   layer                          L2 / L3 等，仅展示
+#   vendor / model                 厂商 / 型号
+#   ip / mac                       管理地址 / MAC（可空）
+#   location                       物理位置，如 “A01 机柜 U20”
+#   note                           备注
+#   ports[]                        可选，端口名列表，用于网页下拉选择、端口排序和绘制交换机前面板
+#                                    （Te/XGE/SFP 等开头画成光口；纯数字编号时超出 8 的整数倍的尾部端口画成光口，如 24+2）
+#   port_locations                 可选，端口 → 物理位置对照，如 {"12": "A03 机柜 配线架 2-12"}；
+#                                    端口定位（SNMP 读取 MAC 表）把设备挂到该端口时，自动填入设备的 location
+#   node_side                      拓扑图中终端挂在交换机的哪一侧：left | right
+#   node_columns                   每个端口下终端卡片的列数（默认 2）
+#   monitor                        监控参数，同 nodes[].monitor（含 alert，默认不告警）
+#   position {x, y}                拓扑图坐标（交换机左上角）
+#
+# links[]:                         交换机之间的连线
+#   id                             唯一标识（可空，自动生成）
+#   from {switch, port}            一端：交换机 id + 端口名
+#   to   {switch, port}            另一端
+#   kind                           uplink | stack | other（默认 uplink）
+#   note                           备注
+#
+# nodes[]:                         终端节点
+#   id                             唯一标识（可空，自动生成）
+#   name                           显示名（可空，默认显示 IP）
+#   hostname                       主机名，网段扫描自动获得（NetBIOS / mDNS / 反向 DNS），未填 name 时显示它
+#   ip                             IPv4 地址，为空则不监控
+#   mac                            MAC 地址，大写冒号分隔（网段扫描按 MAC 识别设备、跟踪 IP 变化）
+#   ip_mode                        IP 分配方式：留空=自动跟踪（扫描发现 MAC 换了 IP 时自动更新）
+#                                    dhcp=自动获取（同上，并作为 DHCP 设备显示）
+#                                    static=固定 IP（锁定，不自动修改，只给出提示）
+#   vendor                         厂商（通常由 MAC 前缀 OUI 判断）
+#   attach {switch, port}          接线位置：所接交换机 id 和端口名；switch 为空表示未定位
+#   location                       物理位置（机柜 / U 位 / 房间等）
+#   flags[]                        状态标记，可多选：
+#                                    gateway    默认网关
+#                                    suspect    存疑（复扫未见 / ping 不通 / 信息待核实）
+#                                    unlocated  未定位（只在 ARP 中见到，不知道接在哪）
+#                                    arp_only   仅 ARP 可见，交换机 MAC 表未记录
+#                                    jump_host  跳板机
+#                                    no_ipv4    无 IPv4 地址
+#                                    critical   关键设备（告警消息中标注）
+#                                    discovered 由网段扫描自动添加
+#   tags[]                         自定义标签
+#   note                           备注
+#   monitor:                       监控参数，不填则继承 config.yaml 中 ping 的默认值
+#     enabled                      是否 ping 监控（默认 true）
+#     alert                        是否推送企业微信告警（默认 false，需要告警的设备显式设为 true）
+#     interval_ms                  ping 间隔毫秒（>=200）
+#     timeout_ms                   超时毫秒
+#     latency_warn_ms              1 分钟平均延迟告警阈值
+#     loss_warn_pct                1 分钟丢包率告警阈值（%）
+#   position {x, y}                拓扑图坐标（为空则自动排布）
+# =============================================================================
+
