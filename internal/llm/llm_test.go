@@ -134,3 +134,212 @@ func TestUsageAdd(t *testing.T) {
 		t.Fatalf("usage: %+v", u)
 	}
 }
+
+func TestNormalizeProtocol(t *testing.T) {
+	cases := map[string]string{
+		"":                 ProtocolOpenAI,
+		"openai":           ProtocolOpenAI,
+		"unknown":          ProtocolOpenAI,
+		"openai-responses": ProtocolOpenAIResponses,
+		"responses":        ProtocolOpenAIResponses,
+		"anthropic":        ProtocolAnthropic,
+		"claude":           ProtocolAnthropic,
+		"gemini":           ProtocolGemini,
+		"google":           ProtocolGemini,
+	}
+	for in, want := range cases {
+		if got := NormalizeProtocol(in); got != want {
+			t.Fatalf("NormalizeProtocol(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestStreamOpenAIResponses(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/responses" || r.Header.Get("Authorization") != "Bearer resp-key" {
+			t.Errorf("unexpected request: %s %s %v", r.Method, r.URL, r.Header)
+		}
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["model"] != "gpt-5" || body["instructions"] != "你是网络助手" || body["stream"] != true {
+			t.Fatalf("body: %v", body)
+		}
+		if body["reasoning"].(map[string]interface{})["effort"] != "medium" {
+			t.Fatalf("reasoning: %v", body["reasoning"])
+		}
+		input := body["input"].([]interface{})
+		if len(input) != 3 {
+			t.Fatalf("input len: %d %v", len(input), input)
+		}
+		if input[1].(map[string]interface{})["type"] != "function_call" || input[2].(map[string]interface{})["type"] != "function_call_output" {
+			t.Fatalf("input items: %v", input)
+		}
+		tools := body["tools"].([]interface{})
+		if tools[0].(map[string]interface{})["name"] != "ping_now" {
+			t.Fatalf("tools: %v", tools)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: response.reasoning_summary_text.delta\ndata: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"先核实\"}\n\n")
+		fmt.Fprint(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"网络\"}\n\n")
+		fmt.Fprint(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"通畅\"}\n\n")
+		fmt.Fprint(w, "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_abc\",\"name\":\"get_device\",\"arguments\":\"\"}}\n\n")
+		fmt.Fprint(w, "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"{\\\"id\\\":\"}\n\n")
+		fmt.Fprint(w, "event: response.function_call_arguments.done\ndata: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"arguments\":\"{\\\"id\\\":\\\"sw1\\\"}\"}\n\n")
+		fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":30,\"output_tokens\":12,\"total_tokens\":42,\"input_tokens_details\":{\"cached_tokens\":10}}}}\n\n")
+	}))
+	defer ts.Close()
+
+	c := Client{Protocol: ProtocolOpenAIResponses, BaseURL: ts.URL + "/v1", APIKey: "resp-key", Model: "gpt-5", Thinking: true}
+	var deltas []string
+	var prevCall ToolCall
+	prevCall.ID = "call_prev"
+	prevCall.Type = "function"
+	prevCall.Function.Name = "ping_now"
+	prevCall.Function.Arguments = `{"ip":"1.1.1.1"}`
+	msg, usage, err := c.Stream(context.Background(), Request{
+		Messages: []Message{
+			{Role: "system", Content: "你是网络助手"},
+			{Role: "user", Content: "检查"},
+			{Role: "assistant", ToolCalls: []ToolCall{prevCall}},
+			{Role: "tool", ToolCallID: "call_prev", Content: `{"ok":true}`},
+		},
+		Tools:     []Tool{{Type: "function", Function: ToolFunction{Name: "ping_now"}}},
+		MaxTokens: 10,
+	}, func(s string) { deltas = append(deltas, s) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Content != "网络通畅" || msg.ReasoningContent != "先核实" || !reflect.DeepEqual(deltas, []string{"网络", "通畅"}) {
+		t.Fatalf("msg: %+v deltas: %v", msg, deltas)
+	}
+	if len(msg.ToolCalls) != 1 || msg.ToolCalls[0].ID != "call_abc" || msg.ToolCalls[0].Function.Name != "get_device" || msg.ToolCalls[0].Function.Arguments != `{"id":"sw1"}` {
+		t.Fatalf("calls: %+v", msg.ToolCalls)
+	}
+	if usage != (Usage{PromptTokens: 30, CompletionTokens: 12, TotalTokens: 42, CacheHitTokens: 10}) {
+		t.Fatalf("usage: %+v", usage)
+	}
+}
+
+func TestStreamAnthropic(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/messages" || r.Header.Get("x-api-key") != "ant-key" || r.Header.Get("anthropic-version") != "2023-06-01" {
+			t.Errorf("unexpected request: %s %s %v", r.Method, r.URL, r.Header)
+		}
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["model"] != "claude-sonnet-4-5" || body["system"] != "系统提示" || body["stream"] != true {
+			t.Fatalf("body: %v", body)
+		}
+		if body["thinking"].(map[string]interface{})["type"] != "enabled" {
+			t.Fatalf("thinking: %v", body["thinking"])
+		}
+		msgs := body["messages"].([]interface{})
+		if len(msgs) != 3 || msgs[0].(map[string]interface{})["role"] != "user" || msgs[1].(map[string]interface{})["role"] != "assistant" || msgs[2].(map[string]interface{})["role"] != "user" {
+			t.Fatalf("messages: %v", msgs)
+		}
+		tools := body["tools"].([]interface{})
+		if tools[0].(map[string]interface{})["input_schema"] == nil {
+			t.Fatalf("tools: %v", tools)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":20,\"cache_read_input_tokens\":5,\"output_tokens\":0}}}\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"分析中\"}}\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"一切\"}}\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"正常\"}}\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"get_overview\",\"input\":{}}}\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"a\\\":\"}}\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"1}\"}}\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9}}\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer ts.Close()
+
+	c := Client{Protocol: ProtocolAnthropic, BaseURL: ts.URL, APIKey: "ant-key", Model: "claude-sonnet-4-5", Thinking: true}
+	var deltas []string
+	var prevCall ToolCall
+	prevCall.ID = "toolu_0"
+	prevCall.Type = "function"
+	prevCall.Function.Name = "ping_now"
+	prevCall.Function.Arguments = `{"ip":"1.1.1.1"}`
+	msg, usage, err := c.Stream(context.Background(), Request{
+		Messages: []Message{
+			{Role: "system", Content: "系统提示"},
+			{Role: "user", Content: "诊断"},
+			{Role: "assistant", ToolCalls: []ToolCall{prevCall}},
+			{Role: "tool", ToolCallID: "toolu_0", Content: `{"ok":true}`},
+		},
+		Tools: []Tool{{Type: "function", Function: ToolFunction{Name: "get_overview"}}},
+	}, func(s string) { deltas = append(deltas, s) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Content != "一切正常" || msg.ReasoningContent != "分析中" || !reflect.DeepEqual(deltas, []string{"一切", "正常"}) {
+		t.Fatalf("msg: %+v deltas: %v", msg, deltas)
+	}
+	if len(msg.ToolCalls) != 1 || msg.ToolCalls[0].ID != "toolu_1" || msg.ToolCalls[0].Function.Name != "get_overview" || msg.ToolCalls[0].Function.Arguments != `{"a":1}` {
+		t.Fatalf("calls: %+v", msg.ToolCalls)
+	}
+	if usage != (Usage{PromptTokens: 25, CompletionTokens: 9, TotalTokens: 34, CacheHitTokens: 5}) {
+		t.Fatalf("usage: %+v", usage)
+	}
+}
+
+func TestStreamGemini(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1beta/models/gemini-2.5-flash:streamGenerateContent" || r.URL.Query().Get("alt") != "sse" || r.Header.Get("x-goog-api-key") != "gem-key" {
+			t.Errorf("unexpected request: %s %s %v", r.Method, r.URL, r.Header)
+		}
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["systemInstruction"] == nil || body["tools"] == nil {
+			t.Fatalf("body: %v", body)
+		}
+		contents := body["contents"].([]interface{})
+		if len(contents) != 3 || contents[1].(map[string]interface{})["role"] != "model" {
+			t.Fatalf("contents: %v", contents)
+		}
+		fnResp := contents[2].(map[string]interface{})["parts"].([]interface{})[0].(map[string]interface{})["functionResponse"].(map[string]interface{})
+		if fnResp["name"] != "ping_now" {
+			t.Fatalf("functionResponse: %v", fnResp)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"思考\",\"thought\":true},{\"text\":\"状态\"}]}}]}\n\n")
+		fmt.Fprint(w, "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"良好\"},{\"functionCall\":{\"name\":\"get_device\",\"args\":{\"id\":\"core\"}}}]}}],\"usageMetadata\":{\"promptTokenCount\":15,\"candidatesTokenCount\":5,\"thoughtsTokenCount\":3,\"totalTokenCount\":23,\"cachedContentTokenCount\":4}}\n\n")
+	}))
+	defer ts.Close()
+
+	c := Client{Protocol: ProtocolGemini, BaseURL: ts.URL, APIKey: "gem-key", Model: "gemini-2.5-flash", Thinking: true}
+	var deltas []string
+	var prevCall ToolCall
+	prevCall.ID = "g_0"
+	prevCall.Type = "function"
+	prevCall.Function.Name = "ping_now"
+	prevCall.Function.Arguments = `{"ip":"1.1.1.1"}`
+	msg, usage, err := c.Stream(context.Background(), Request{
+		Messages: []Message{
+			{Role: "system", Content: "系统提示"},
+			{Role: "user", Content: "诊断"},
+			{Role: "assistant", ToolCalls: []ToolCall{prevCall}},
+			{Role: "tool", ToolCallID: "g_0", Content: `{"ok":true}`},
+		},
+		Tools: []Tool{{Type: "function", Function: ToolFunction{Name: "get_device"}}},
+	}, func(s string) { deltas = append(deltas, s) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Content != "状态良好" || msg.ReasoningContent != "思考" || !reflect.DeepEqual(deltas, []string{"状态", "良好"}) {
+		t.Fatalf("msg: %+v deltas: %v", msg, deltas)
+	}
+	if len(msg.ToolCalls) != 1 || msg.ToolCalls[0].ID != "call_0" || msg.ToolCalls[0].Function.Name != "get_device" || msg.ToolCalls[0].Function.Arguments != `{"id":"core"}` {
+		t.Fatalf("calls: %+v", msg.ToolCalls)
+	}
+	if usage != (Usage{PromptTokens: 15, CompletionTokens: 8, TotalTokens: 23, CacheHitTokens: 4}) {
+		t.Fatalf("usage: %+v", usage)
+	}
+}

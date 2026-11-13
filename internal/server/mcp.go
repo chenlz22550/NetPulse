@@ -38,7 +38,7 @@ const mcpInstructions = `netPing 是机房网络 Ping 监控工具。通过本�
    现场核实（只读，从 netPing 主机实时探测）：get_switch_ports（SNMP 读交换机端口状态、速率、双工、错误计数增长、交换机运行时长）、tcp_check（TCP 端口探测，区分离线与禁 ping）、arp_lookup（ARP 核对，发现 IP 冲突）、trace_route（逐跳路由追踪）、dns_lookup（DNS 解析）。
 2. 端口定位：get_locate_status、get_switch_mac_table（交换机每个口学到的 MAC）、locate_device（设备实际插在哪个口）、auto_locate（未定位设备自动挂到端口）、apply_location、test_switch_snmp、set_locate_settings。
 网段扫描（自动扫描模式）：get_discovery 查看扫描任务与结果；upsert_scan_job 新建/修改扫描任务（一个或多个网段，按间隔自动扫描、自动添加新设备）、delete_scan_job、scan_network 立即扫描（可传 subnets 临时扫描）、set_discovery_settings、add_discovered_devices、apply_ip_suggestion。
-3. 管理（非只读模式）：upsert_device / delete_device（终端节点）、upsert_switch / delete_switch、upsert_link / delete_link、reset_layout、set_alerting（开关设备告警）、set_alert_config / send_test_alert（企业微信通道）、set_ping_defaults、set_site、set_schedule（全局监控时段）、set_monitoring_paused、replace_topology_yaml（整体替换，先 dry_run 校验）、set_ai_settings（AI 诊断开关、深度思考、回答前自检、模型名、超时）。
+3. 管理（非只读模式）：upsert_device / delete_device（终端节点）、upsert_switch / delete_switch、upsert_link / delete_link、reset_layout、set_alerting（开关设备告警）、set_alert_config / send_test_alert（企业微信通道）、set_ping_defaults、set_site、set_schedule（全局监控时段）、set_monitoring_paused、replace_topology_yaml（整体替换，先 dry_run 校验）、set_ai_settings（AI 诊断开关、协议格式、深度思考、回答前自检、模型名、超时）。
 不能通过 MCP 修改：监听地址、网页登录账号、MCP 自身设置、AI 的 API Key / 接口地址 / 代理（需在网页或 config.yaml 中修改）。
 约定：设备用 id 或 ip 指定；修改会立即写回 topology.yaml 并生效；设备默认只监控不告警；时间均为服务器本地时间。
 字段说明见资源 netping://docs/topology-fields.md。批量迁移机房时优先使用 replace_topology_yaml 并先 dry_run=true。删除或整体替换前请先向用户确认。`
@@ -919,9 +919,10 @@ func init() {
 		},
 		{
 			Name: "set_ai_settings", Title: "修改 AI 诊断设置", Write: true,
-			Description: "修改网页「AI 诊断」的设置（只修改提供的字段）：是否启用、深度思考、回答前自检（模型写完回答后核对数据、必要时实测并修正）、模型名、单次诊断超时。出于安全考虑不能修改 API Key、接口地址和代理（需在网页中修改）。",
+			Description: "修改网页「AI 诊断」的设置（只修改提供的字段）：是否启用、协议格式（openai / openai-responses / anthropic / gemini）、深度思考、回答前自检（模型写完回答后核对数据、必要时实测并修正）、模型名、单次诊断超时。出于安全考虑不能修改 API Key、接口地址和代理（需在网页中修改）。",
 			Schema: obj(map[string]interface{}{
 				"enabled":     boolean("是否启用 AI 诊断"),
+				"protocol":    enum("协议格式：openai（OpenAI Chat Completions）、openai-responses（OpenAI Responses）、anthropic（Claude Messages）、gemini（Google Gemini）", "openai", "openai-responses", "anthropic", "gemini"),
 				"thinking":    boolean("深度思考（更慢、更贵）"),
 				"self_check":  boolean("回答前自检（默认开启）"),
 				"model":       str("模型名，如 deepseek-flash"),

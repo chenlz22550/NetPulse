@@ -72,7 +72,7 @@ func TestAIDiagnose(t *testing.T) {
 		t.Fatalf("no key: %d", code)
 	}
 	code, out := put(`{"base_url":"` + llmSrv.URL + `","api_key":"sk-test-123456"}`)
-	if code != 200 || out["api_key_set"] != true || strings.Contains(fmtJSON(out), "sk-test-123456") {
+	if code != 200 || out["api_key_set"] != true || out["protocol"] != "openai" || strings.Contains(fmtJSON(out), "sk-test-123456") {
 		t.Fatalf("settings: %d %v", code, out)
 	}
 	// 只改其他字段时保留 Key；网页配置接口不返回 Key，也不能通过它改掉 Key
@@ -201,5 +201,60 @@ func TestAIFocusContext(t *testing.T) {
 	sys := fmtJSON((*reqs)[0]["messages"].([]interface{})[0])
 	if !strings.Contains(sys, "重点设备") || !strings.Contains(sys, id) || !strings.Contains(sys, "近 1 小时") {
 		t.Fatalf("focus context missing: %.300s", sys)
+	}
+}
+
+func TestAIProtocolAnthropic(t *testing.T) {
+	s, ts := newTestServer(t)
+	var reqs []map[string]interface{}
+	antSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages" || r.Header.Get("x-api-key") != "sk-test-123456" {
+			w.WriteHeader(401)
+			_, _ = io.WriteString(w, `{"error":{"message":"invalid x-api-key"}}`)
+			return
+		}
+		var body map[string]interface{}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		reqs = append(reqs, body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		if len(reqs) == 1 {
+			_, _ = io.WriteString(w, "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"list_devices\",\"input\":{\"state\":\"abnormal\"}}}\n\n")
+			_, _ = io.WriteString(w, "data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":50,\"output_tokens\":10}}\n\n")
+			_, _ = io.WriteString(w, "data: {\"type\":\"message_stop\"}\n\n")
+			return
+		}
+		_, _ = io.WriteString(w, "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"**结论**：Anthropic 协议正常。\"}}\n\n")
+		_, _ = io.WriteString(w, "data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":80,\"output_tokens\":12}}\n\n")
+		_, _ = io.WriteString(w, "data: {\"type\":\"message_stop\"}\n\n")
+	}))
+	t.Cleanup(antSrv.Close)
+
+	c := newClient()
+	authPost(t, c, ts, "/api/auth/login", `{"password":"`+testPassword+`"}`)
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/ai/settings", strings.NewReader(`{"protocol":"anthropic","base_url":"`+antSrv.URL+`","model":"claude-sonnet-4-5","api_key":"sk-test-123456","self_check":false}`))
+	req.Header.Set("Content-Type", "application/json")
+	if resp, err := c.Do(req); err != nil || resp.StatusCode != 200 {
+		t.Fatalf("put settings: %v", err)
+	} else {
+		resp.Body.Close()
+	}
+	if got := s.Cfg.Get().AI.Protocol; got != "anthropic" {
+		t.Fatalf("protocol = %q", got)
+	}
+	resp, err := c.Post(ts.URL+"/api/ai/diagnose", "application/json", strings.NewReader(`{"messages":[{"role":"user","content":"现在怎么样？"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var text strings.Builder
+	sc := bufio.NewScanner(resp.Body)
+	for sc.Scan() {
+		var ev map[string]interface{}
+		if json.Unmarshal(sc.Bytes(), &ev) == nil && ev["t"] == "delta" {
+			text.WriteString(ev["text"].(string))
+		}
+	}
+	if !strings.Contains(text.String(), "Anthropic 协议正常") || len(reqs) != 2 {
+		t.Fatalf("text=%q reqs=%d", text.String(), len(reqs))
 	}
 }

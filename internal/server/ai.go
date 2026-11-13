@@ -70,7 +70,7 @@ func (s *Server) aiClient(c config.Config) *llm.Client {
 		proxy = c.Alert.ProxyURL
 	}
 	return &llm.Client{
-		BaseURL: c.AI.BaseURL, APIKey: c.AI.APIKey, Model: c.AI.Model, Thinking: c.AI.Thinking,
+		Protocol: c.AI.Protocol, BaseURL: c.AI.BaseURL, APIKey: c.AI.APIKey, Model: c.AI.Model, Thinking: c.AI.Thinking,
 		ProxyURL: proxy, TLSSkipVerify: c.Alert.TLSSkipVerify, Timeout: time.Duration(c.AI.TimeoutSec) * time.Second,
 	}
 }
@@ -176,7 +176,8 @@ func keyHint(k string) string {
 
 func aiSettingsView(a config.AIConfig) map[string]interface{} {
 	return map[string]interface{}{
-		"enabled": a.Enabled, "base_url": a.BaseURL, "model": a.Model, "thinking": a.Thinking,
+		"enabled": a.Enabled, "protocol": llm.NormalizeProtocol(a.Protocol),
+		"base_url": a.BaseURL, "model": a.Model, "thinking": a.Thinking,
 		"proxy_url": a.ProxyURL, "timeout_sec": a.TimeoutSec, "self_check": a.SelfCheckOn(),
 		"api_key_set": a.APIKey != "", "api_key_hint": keyHint(a.APIKey),
 		"ready": a.Enabled && a.APIKey != "",
@@ -186,7 +187,8 @@ func aiSettingsView(a config.AIConfig) map[string]interface{} {
 // aiPublicSettings 供 MCP get_settings 返回的 AI 设置（不含 API Key 与代理）。
 func aiPublicSettings(a config.AIConfig) map[string]interface{} {
 	return map[string]interface{}{
-		"enabled": a.Enabled, "model": a.Model, "base_url": a.BaseURL, "thinking": a.Thinking,
+		"enabled": a.Enabled, "protocol": llm.NormalizeProtocol(a.Protocol),
+		"model": a.Model, "base_url": a.BaseURL, "thinking": a.Thinking,
 		"self_check": a.SelfCheckOn(), "timeout_sec": a.TimeoutSec, "api_key_set": a.APIKey != "",
 	}
 }
@@ -204,6 +206,14 @@ func toolSetAISettings(s *Server, a map[string]json.RawMessage, remote string) (
 		if v, ok := argBool(a, "enabled"); ok {
 			ai.Enabled = v
 			changed = append(changed, "enabled")
+		}
+		if p := strings.TrimSpace(argStr(a, "protocol")); p != "" {
+			np := llm.NormalizeProtocol(p)
+			if np != strings.ToLower(p) && !isProtocolAlias(p) {
+				return fmt.Errorf("protocol 必须是 openai、openai-responses、anthropic 或 gemini")
+			}
+			ai.Protocol = np
+			changed = append(changed, "protocol")
 		}
 		if v, ok := argBool(a, "thinking"); ok {
 			ai.Thinking = v
@@ -226,7 +236,7 @@ func toolSetAISettings(s *Server, a map[string]json.RawMessage, remote string) (
 			changed = append(changed, "timeout_sec")
 		}
 		if len(changed) == 0 {
-			return fmt.Errorf("没有要修改的字段（可选 enabled、thinking、self_check、model、timeout_sec）")
+			return fmt.Errorf("没有要修改的字段（可选 enabled、protocol、thinking、self_check、model、timeout_sec）")
 		}
 		return nil
 	})
@@ -237,9 +247,20 @@ func toolSetAISettings(s *Server, a map[string]json.RawMessage, remote string) (
 	return map[string]interface{}{"ok": true, "changed": changed, "ai": aiPublicSettings(c.AI)}, nil
 }
 
+func isProtocolAlias(p string) bool {
+	switch strings.ToLower(strings.TrimSpace(p)) {
+	case llm.ProtocolOpenAI, llm.ProtocolOpenAIResponses, "responses", "openai_responses",
+		llm.ProtocolAnthropic, "claude", llm.ProtocolGemini, "google":
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *Server) handleAISettings(w http.ResponseWriter, r *http.Request) error {
 	var req struct {
 		Enabled    *bool   `json:"enabled"`
+		Protocol   *string `json:"protocol"`
 		BaseURL    *string `json:"base_url"`
 		Model      *string `json:"model"`
 		Thinking   *bool   `json:"thinking"`
@@ -256,6 +277,9 @@ func (s *Server) handleAISettings(w http.ResponseWriter, r *http.Request) error 
 	a := &c.AI
 	if req.Enabled != nil {
 		a.Enabled = *req.Enabled
+	}
+	if req.Protocol != nil {
+		a.Protocol = llm.NormalizeProtocol(*req.Protocol)
 	}
 	if req.BaseURL != nil {
 		a.BaseURL = *req.BaseURL
@@ -284,7 +308,7 @@ func (s *Server) handleAISettings(w http.ResponseWriter, r *http.Request) error 
 	if err := s.Cfg.Update(c); err != nil {
 		return badRequest("%v", err)
 	}
-	log.Printf("AI 诊断设置已修改（来源 %s，模型 %s）", clientAddr(r), s.Cfg.Get().AI.Model)
+	log.Printf("AI 诊断设置已修改（来源 %s，协议 %s，模型 %s）", clientAddr(r), s.Cfg.Get().AI.Protocol, s.Cfg.Get().AI.Model)
 	writeJSON(w, aiSettingsView(s.Cfg.Get().AI))
 	return nil
 }
