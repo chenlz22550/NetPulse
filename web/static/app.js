@@ -470,7 +470,8 @@
         <div class="panel"><div class="ph">模型设置<span class="r" id="aiState"></span></div><div class="pb"><form id="aiSet"></form></div></div>
         <div class="panel"><div class="ph">说明</div><div class="pb"><ul class="help" style="margin:0;padding-left:18px">
           <li>AI 会先看当前概况，再按需查询设备列表、历史曲线、告警记录、扫描与端口定位结果，最后给出结论和排查步骤。</li>
-          <li>AI 只能<b>查询</b>，不能修改任何配置。</li>
+          <li>AI 只能<b>查询</b>和<b>现场探测</b>（ping、TCP 端口、ARP、路由追踪、DNS、通过 SNMP 读交换机端口状态），不能修改任何配置。</li>
+          <li>开启「回答前自检」后，AI 写完回答会对照数据逐条核对，缺证据时再实测；核对通过显示 ✓，发现问题会直接给出修正后的回答（可展开查看初稿）。</li>
           <li>诊断时会把相关设备的 IP、MAC、名称、延迟丢包数据发送给模型服务商（默认 DeepSeek）。</li>
           <li>在拓扑页或设备详情页点「AI 诊断」可以直接诊断某一台设备。</li>
         </ul></div></div>
@@ -480,11 +481,18 @@
     const log = $('#aiLog');
     const msgHTML = (m, i) => {
       if (m.role === 'user') return `<div class="ai-msg user" data-i="${i}"><div class="ai-bubble">${esc(m.content).replace(/\n/g, '<br>')}</div></div>`;
-      const tools = (m.tools || []).map(t => `<span class="ai-tool" title="${esc(t.args || '')}">查询 · ${esc(t.title || t.name)}${t.args && t.args !== '{}' ? ' <span class="muted">' + esc(t.args.slice(0, 60)) + '</span>' : ''}</span>`).join('');
+      const tools = (m.tools || []).map(t => `<span class="ai-tool${t.phase === 'review' ? ' review' : ''}" title="${esc(t.args || '')}">${t.phase === 'review' ? '核实' : '查询'} · ${esc(t.title || t.name)}${t.args && t.args !== '{}' ? ' <span class="muted">' + esc(t.args.slice(0, 60)) + '</span>' : ''}</span>`).join('');
+      const ck = m.check;
+      let check = '';
+      if (ck && ck.result === 'reviewing') check = '';
+      else if (ck && ck.result === 'pass') check = `<div class="ai-check ok">✓ 已自检${ck.calls ? `（追加核实 ${ck.calls} 次）` : ''}${ck.text ? '：' + esc(ck.text) : ''}</div>`;
+      else if (ck && ck.result === 'revised') check = `<div class="ai-check fix">✎ 自检发现问题，已修正回答${ck.calls ? `（追加核实 ${ck.calls} 次）` : ''}</div>`;
+      else if (ck && (ck.result === 'failed' || ck.result === 'skipped') && ck.text) check = `<div class="ai-check warn">${esc(ck.text)}</div>`;
+      const draft = m.draft && ck && ck.result === 'revised' ? `<details class="ai-draft"><summary>查看修正前的初稿</summary><div class="ai-md">${mdLite(m.draft)}</div></details>` : '';
       const meta = m.meta ? `<div class="ai-meta">${esc(m.meta)}</div>` : '';
       const status = m.status ? `<div class="ai-status"><span class="ai-spin"></span>${esc(m.status)}</div>` : '';
       const err = m.error ? `<div class="ai-err">${esc(m.error)}</div>` : '';
-      return `<div class="ai-msg bot" data-i="${i}">${tools ? `<div class="ai-tools">${tools}</div>` : ''}<div class="ai-md">${mdLite(m.content)}</div>${status}${err}${meta}</div>`;
+      return `<div class="ai-msg bot" data-i="${i}">${tools ? `<div class="ai-tools">${tools}</div>` : ''}<div class="ai-md">${mdLite(m.content)}</div>${check}${draft}${status}${err}${meta}</div>`;
     };
     const renderLog = () => {
       log.innerHTML = chat.length ? chat.map(msgHTML).join('') :
@@ -546,17 +554,29 @@
               bot.content += ev.text; bot.status = '';
             } else if (ev.t === 'tool') { bot.tools.push(ev); bot.status = '正在查询 ' + (ev.title || ev.name) + '…'; }
             else if (ev.t === 'break') pendingBreak = true;
+            else if (ev.t === 'review') { bot.check = { result: 'reviewing' }; bot.status = '正在自检…'; }
+            else if (ev.t === 'revise') { bot.draft = bot.content; bot.content = ''; pendingBreak = false; bot.status = '正在修正回答…'; }
+            else if (ev.t === 'review_end') {
+              bot.check = { result: ev.result, text: ev.text || '', calls: ev.calls || 0 };
+              if (ev.restore && bot.draft) { bot.content = bot.draft; bot.draft = ''; }
+              bot.status = '';
+            }
             else if (ev.t === 'error') { bot.error = ev.error; bot.status = ''; }
             else if (ev.t === 'done') {
               bot.status = '';
               const u = ev.usage || {};
-              bot.meta = `${ev.model} · ${(ev.ms / 1000).toFixed(1)} 秒 · 查询 ${ev.tools} 次 · ${u.total_tokens || 0} tokens`;
+              const rv = { pass: ' · 自检通过', revised: ' · 自检已修正', failed: ' · 自检未完成' }[ev.review] || '';
+              bot.meta = `${ev.model} · ${(ev.ms / 1000).toFixed(1)} 秒 · 查询 ${ev.tools} 次 · ${u.total_tokens || 0} tokens${rv}`;
             }
             renderOne(bi);
           }
         }
+        if (bot.check && bot.check.result === 'reviewing') bot.check = null;
+        if (!bot.content && bot.draft) { bot.content = bot.draft; bot.draft = ''; }
         if (!bot.content && !bot.error) bot.error = '模型没有返回内容，请重试。';
       } catch (e) {
+        if (bot.check && bot.check.result === 'reviewing') bot.check = null;
+        if (!bot.content && bot.draft) { bot.content = bot.draft; bot.draft = ''; }
         if (e.name === 'AbortError') bot.error = bot.content ? '' : '已停止';
         else bot.error = errMsg(e);
         if (bot.content && e.name === 'AbortError') bot.meta = '已停止';
@@ -589,7 +609,8 @@
       $('#aiModel').textContent = a.ready ? '  ' + a.model + (a.thinking ? ' · 深度思考' : '') : '';
       $('#aiSet').innerHTML = `
         <div class="checks" style="margin-bottom:8px"><label><input type="checkbox" name="enabled" ${a.enabled ? 'checked' : ''}> 启用 AI 诊断</label>
-          <label title="更慢、更贵，复杂问题时可开启"><input type="checkbox" name="thinking" ${a.thinking ? 'checked' : ''}> 深度思考</label></div>
+          <label title="更慢、更贵，复杂问题时可开启"><input type="checkbox" name="thinking" ${a.thinking ? 'checked' : ''}> 深度思考</label>
+          <label title="写完回答后逐条核对数据，必要时实测（ping、端口、交换机端口状态），发现问题自动修正；会多一次模型调用"><input type="checkbox" name="self_check" ${a.self_check ? 'checked' : ''}> 回答前自检</label></div>
         <label class="f"><span>API Key${a.api_key_set ? `（已设置 ${esc(a.api_key_hint)}，留空不修改）` : ''}</span>
           <button class="btn ai-key-unlock" type="button" id="aiKeyUnlock">${a.api_key_set ? '点击修改 API Key' : '点击填写 API Key'}</button></label>
         <div class="row2">
@@ -615,7 +636,7 @@
         keyInput.focus();
       };
       const body = () => ({
-        enabled: f.elements.enabled.checked, thinking: f.elements.thinking.checked,
+        enabled: f.elements.enabled.checked, thinking: f.elements.thinking.checked, self_check: f.elements.self_check.checked,
         ...(keyInput ? { api_key: keyInput.value.trim() } : {}),
         model: f.elements.model.value.trim(), timeout_sec: parseInt(f.elements.timeout_sec.value, 10) || 120,
         base_url: f.elements.base_url.value.trim(), proxy_url: f.elements.proxy_url.value.trim(),
@@ -1938,6 +1959,13 @@
           <li>接入交换机 Port 12 下面的设备最近 7 天谁最不稳定</li>
           <li>生成一份今天的网络健康报告（使用提示词 health_report）</li>
         </ul></div>
+        <div><b>现场核实</b><ul>
+          <li>192.168.50.19 ping 不通，帮我确认它是真离线还是禁 ping（测一下常用端口、看 ARP）</li>
+          <li>3 楼打印机老丢包，看看它接的交换机端口有没有错误包、是不是半双工</li>
+          <li>接入交换机最近重启过吗？哪些端口有错误计数在增长</li>
+          <li>外网打不开，追踪一下到 223.5.5.5 断在哪一跳，再看看 DNS 解析正不正常</li>
+          <li>把 AI 诊断的回答前自检打开</li>
+        </ul></div>
         <div><b>节点维护</b><ul>
           <li>把 192.168.50.19 的接线位置改成接入交换机 Port 5，位置填 A03 机柜</li>
           <li>新增一台服务器 192.168.50.60，名称“备份存储”，接在核心 Gi0/7，开启告警</li>
@@ -2081,7 +2109,7 @@
       s.push(info.read_only ? '<span class="badge slow">只读</span>' : '<span class="badge unknown">可读写</span>');
       s.push(info.token_set ? '<span class="badge ok">令牌认证</span>' : info.auth_basic ? '<span class="badge unknown">需要令牌</span>' : '<span class="badge slow">尚未设置密码</span>');
       $('#mStat').innerHTML = s.join(' ');
-      const kind = t => t.destructive ? '<span class="badge down">修改·需确认</span>' : t.write ? '<span class="badge slow">修改</span>' : '<span class="badge ok">查询</span>';
+      const kind = t => t.destructive ? '<span class="badge down">修改·需确认</span>' : t.write ? '<span class="badge slow">修改</span>' : t.probe ? '<span class="badge ok" title="从 netPing 主机实时发包探测，只读">查询·实时探测</span>' : '<span class="badge ok">查询</span>';
       $('#mTools').innerHTML = info.tools.map(t => `<tr${info.read_only && t.write ? ' class="dim"' : ''}><td class="mono"><b>${esc(t.name)}</b><br><span class="muted" style="font-family:var(--sans)">${esc(t.title)}</span></td><td class="wrap">${esc(t.description)}</td><td>${kind(t)}</td></tr>`).join('');
       const nw = info.tools.filter(t => !t.write).length;
       $('#mToolCnt').textContent = `${info.tools.length} 个（查询 ${nw}，修改 ${info.tools.length - nw}）${info.read_only ? '，只读模式下修改类工具不可用' : ''}`;

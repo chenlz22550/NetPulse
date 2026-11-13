@@ -35,10 +35,11 @@ var mcpProtocols = []string{"2025-06-18", "2025-03-26", "2024-11-05"}
 const mcpInstructions = `netPing 是机房网络 Ping 监控工具。通过本接口可以：
 1. 查询：get_overview（总体状态与异常设备）、list_devices（设备列表与实时延迟/丢包）、get_device、get_history（历史曲线统计）、list_alerts、get_topology、get_settings。
    分析（只读）：analyze_impact（异常设备按交换机/端口归类，找公共故障点）、get_uplink_path（设备到核心的逐跳路径）、find_outages（历史中断/丢包时段与可用率）、correlate_events（多设备同时异常）、rank_devices（历史稳定性排行）、compare_baseline（与昨天/上周同时段对比）、ping_now（立即 ping 测试）。
+   现场核实（只读，从 netPing 主机实时探测）：get_switch_ports（SNMP 读交换机端口状态、速率、双工、错误计数增长、交换机运行时长）、tcp_check（TCP 端口探测，区分离线与禁 ping）、arp_lookup（ARP 核对，发现 IP 冲突）、trace_route（逐跳路由追踪）、dns_lookup（DNS 解析）。
 2. 端口定位：get_locate_status、get_switch_mac_table（交换机每个口学到的 MAC）、locate_device（设备实际插在哪个口）、auto_locate（未定位设备自动挂到端口）、apply_location、test_switch_snmp、set_locate_settings。
 网段扫描（自动扫描模式）：get_discovery 查看扫描任务与结果；upsert_scan_job 新建/修改扫描任务（一个或多个网段，按间隔自动扫描、自动添加新设备）、delete_scan_job、scan_network 立即扫描（可传 subnets 临时扫描）、set_discovery_settings、add_discovered_devices、apply_ip_suggestion。
-3. 管理（非只读模式）：upsert_device / delete_device（终端节点）、upsert_switch / delete_switch、upsert_link / delete_link、reset_layout、set_alerting（开关设备告警）、set_alert_config / send_test_alert（企业微信通道）、set_ping_defaults、set_site、set_schedule（全局监控时段）、set_monitoring_paused、replace_topology_yaml（整体替换，先 dry_run 校验）。
-不能通过 MCP 修改：监听地址、网页登录账号、MCP 自身设置（需在网页或 config.yaml 中修改）。
+3. 管理（非只读模式）：upsert_device / delete_device（终端节点）、upsert_switch / delete_switch、upsert_link / delete_link、reset_layout、set_alerting（开关设备告警）、set_alert_config / send_test_alert（企业微信通道）、set_ping_defaults、set_site、set_schedule（全局监控时段）、set_monitoring_paused、replace_topology_yaml（整体替换，先 dry_run 校验）、set_ai_settings（AI 诊断开关、深度思考、回答前自检、模型名、超时）。
+不能通过 MCP 修改：监听地址、网页登录账号、MCP 自身设置、AI 的 API Key / 接口地址 / 代理（需在网页或 config.yaml 中修改）。
 约定：设备用 id 或 ip 指定；修改会立即写回 topology.yaml 并生效；设备默认只监控不告警；时间均为服务器本地时间。
 字段说明见资源 netping://docs/topology-fields.md。批量迁移机房时优先使用 replace_topology_yaml 并先 dry_run=true。删除或整体替换前请先向用户确认。`
 
@@ -69,6 +70,7 @@ type mcpTool struct {
 	Schema      map[string]interface{}
 	Write       bool
 	Destructive bool
+	OpenWorld   bool // 会从 netPing 主机向外发包（探测任意地址、外网），对应 MCP openWorldHint
 	Run         func(s *Server, args map[string]json.RawMessage, remote string) (interface{}, error)
 }
 
@@ -228,7 +230,7 @@ func (s *Server) mcpDispatch(m rpcMsg, remote string) (interface{}, *rpcError) {
 					"title":           t.Title,
 					"readOnlyHint":    !t.Write,
 					"destructiveHint": t.Destructive,
-					"openWorldHint":   false,
+					"openWorldHint":   t.OpenWorld,
 				},
 			})
 		}
@@ -916,6 +918,18 @@ func init() {
 			Run: toolSetSite,
 		},
 		{
+			Name: "set_ai_settings", Title: "修改 AI 诊断设置", Write: true,
+			Description: "修改网页「AI 诊断」的设置（只修改提供的字段）：是否启用、深度思考、回答前自检（模型写完回答后核对数据、必要时实测并修正）、模型名、单次诊断超时。出于安全考虑不能修改 API Key、接口地址和代理（需在网页中修改）。",
+			Schema: obj(map[string]interface{}{
+				"enabled":     boolean("是否启用 AI 诊断"),
+				"thinking":    boolean("深度思考（更慢、更贵）"),
+				"self_check":  boolean("回答前自检（默认开启）"),
+				"model":       str("模型名，如 deepseek-flash"),
+				"timeout_sec": integer("单次诊断最长秒数（10~600）"),
+			}),
+			Run: toolSetAISettings,
+		},
+		{
 			Name: "get_locate_status", Title: "端口定位状态",
 			Description: "返回端口定位（SNMP 读取交换机 MAC 地址表）的设置（团体名已脱敏）、要读取的交换机，以及最近一次定位结果：自动挂到端口的设备、端口变化待确认的设备、无法确定的设备、边缘端口上未登记的 MAC、各交换机读取情况和判定的级联口。",
 			Schema:      obj(map[string]interface{}{}),
@@ -1000,6 +1014,7 @@ func init() {
 		},
 	}
 	mcpTools = append(mcpTools, analysisTools()...)
+	mcpTools = append(mcpTools, probeTools()...)
 }
 
 // ---------------------------------------------------------------------------
@@ -1279,6 +1294,7 @@ func toolSettings(s *Server, _ map[string]json.RawMessage, _ string) (interface{
 		"discovery":            c.Discovery,
 		"locate":               maskLocate(c.Locate),
 		"site":                 site,
+		"ai":                   aiPublicSettings(c.AI),
 	}, nil
 }
 
@@ -1731,7 +1747,7 @@ func (s *Server) handleMCPInfo(w http.ResponseWriter) {
 	c := s.Cfg.Get().MCP
 	var tools []map[string]interface{}
 	for _, t := range mcpTools {
-		tools = append(tools, map[string]interface{}{"name": t.Name, "title": t.Title, "description": t.Description, "write": t.Write, "destructive": t.Destructive})
+		tools = append(tools, map[string]interface{}{"name": t.Name, "title": t.Title, "description": t.Description, "write": t.Write, "destructive": t.Destructive, "probe": t.OpenWorld || probeToolNames[t.Name]})
 	}
 	var prompts []map[string]interface{}
 	for _, p := range mcpPrompts {
