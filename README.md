@@ -76,7 +76,21 @@
    | rank_devices | 按 1h/6h/24h/7d 统计丢包率、延迟、中断分钟数、抖动排行，附全网中位数 |
    | compare_baseline | 与昨天同时段、7 天前同时段、过去 7 天整体对比延迟和丢包的变化幅度 |
    | ping_now | 从 netPing 主机立即 ping 设备或任意 IPv4 地址（最多 10 次），确认当前是否真的不通或测试外网出口 |
-4. 默认关闭深度思考以加快速度；复杂问题可勾选「深度思考」。每次诊断记录在 `logs/netping.log`（问题摘要、查询次数、token 用量）。
+
+   还有一组现场核实工具，从 netPing 主机实时探测，让模型用证据验证判断而不是只凭历史数据推测：
+
+   | 工具 | 作用 |
+   |---|---|
+   | get_switch_ports | 通过 SNMP（使用端口定位的团体名）读交换机端口的 up/down、协商速率、双工、错误/丢弃/CRC 计数、最近状态变化和交换机运行时长；间隔几秒采样两次，看错误是否仍在增长和带宽占用。可直接给设备，自动定位到它接的端口 |
+   | tcp_check | 探测设备的常用 TCP 端口（开放/拒绝/超时），ping 不通时区分“真离线”和“禁 ping”，也可确认打印机、摄像头、远程桌面等服务 |
+   | arp_lookup | 查 netPing 主机 ARP 表中该 IP 的 MAC，与登记的 MAC 对比，发现 IP 冲突、设备被更换或二层在线但禁 ping |
+   | trace_route | 逐跳路由追踪（Windows 用系统 ICMP 接口，无需管理员权限），看外网或跨网段不通断在哪一跳 |
+   | dns_lookup | 解析域名或反向解析 IP，可指定 DNS 服务器对比，判断“上不了网”是否是 DNS 问题 |
+4. **回答前自检**（默认开启，可在页面右侧或 `ai.self_check` 关闭）：模型写完回答后，程序先把回答里提到的每台设备按拓扑和此刻的监控状态核对一遍
+   （不在拓扑中、所有数据里也没出现过的地址会被标出，并列出哪些设备还没做现场核实），再让模型以审核人身份逐条核对事实和证据，
+   缺证据时调用上面的工具实测（最多 8 次）。核对通过时回答下方显示“✓ 已自检”；发现问题时直接替换为修正后的回答，可展开查看修正前的初稿。
+   自检出错或超时会保留原回答。自检会多一次模型调用（需要实测时更多）。
+5. 默认关闭深度思考以加快速度；复杂问题可勾选「深度思考」。每次诊断记录在 `logs/netping.log`（问题摘要、查询次数、token 用量）。
 
 诊断时会把相关设备的 IP、MAC、名称和延迟丢包数据发送给模型服务商。API Key 保存在 `config.yaml`，网页和 MCP 都不会返回它。
 
@@ -101,9 +115,10 @@ AI 客户端连接需要访问令牌：在「MCP」页点「生成」并保存�
 |---|---|
 | 查询 | get_overview、list_devices、get_device、get_history、list_alerts、get_topology、get_settings、get_discovery |
 | 分析 | analyze_impact、get_uplink_path、find_outages、correlate_events、rank_devices、compare_baseline、ping_now |
+| 现场核实 | get_switch_ports、tcp_check、arp_lookup、trace_route、dns_lookup |
 | 端口定位 | get_locate_status、get_switch_mac_table、locate_device、auto_locate（可只预览）、apply_location、test_switch_snmp、set_locate_settings |
 | 扫描 | upsert_scan_job、delete_scan_job、scan_network（可临时扫描指定网段）、set_discovery_settings、add_discovered_devices、apply_ip_suggestion |
-| 设置 | set_alert_config、send_test_alert、set_ping_defaults、set_site、set_schedule、set_monitoring_paused |
+| 设置 | set_alert_config、send_test_alert、set_ping_defaults、set_site、set_schedule、set_monitoring_paused、set_ai_settings（AI 启用、深度思考、回答前自检、模型、超时；不能改 API Key / 接口地址 / 代理） |
 | 修改 | reset_layout、upsert_device、delete_device、upsert_switch、delete_switch、upsert_link、delete_link、set_alerting、replace_topology_yaml（默认只校验）、reload_topology_from_disk |
 
 另提供资源（当前拓扑、字段说明、JSON Schema、实时状态）和提示词模板 `generate_topology`（按 MAC/ARP 表生成拓扑）、`health_report`（网络健康报告）。

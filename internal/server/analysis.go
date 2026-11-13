@@ -5,7 +5,6 @@ package server
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math"
 	"net"
@@ -22,7 +21,7 @@ const analysisMaxDevices = 300 // 批量分析最多涉及的设备数
 func analysisTools() []*mcpTool {
 	return []*mcpTool{
 		{
-			Name: "ping_now", Title: "立即 ping 测试",
+			Name: "ping_now", Title: "立即 ping 测试", OpenWorld: true,
 			Description: "从 netPing 所在主机立即对设备或任意 IPv4 地址 ping 若干次，返回每次延迟与丢包统计，并附上该设备的监控数据对比。用于确认“现在到底通不通”、验证修复效果，或测试未纳入监控的地址（如外网 223.5.5.5 判断出口）。",
 			Schema: obj(withIDIP(map[string]interface{}{
 				"count":      integer("ping 次数，默认 5，最多 10"),
@@ -373,38 +372,11 @@ func switchTree(t *topology.Topology) (parent map[string]string, edge map[string
 
 func toolPingNow(s *Server, a map[string]json.RawMessage, _ string) (interface{}, error) {
 	t, _ := s.Topo.Snapshot()
-	id, ip := argStr(a, "id"), argStr(a, "ip")
-	if id != "" {
-		_, rid, err := resolveDevice(t, id, "")
-		if err != nil {
-			return nil, err
-		}
-		id = rid
-		_, ip, _ = deviceLabel(t, id)
-		if ip == "" {
-			return nil, errors.New("该设备没有 IP，无法 ping")
-		}
-	} else if ip == "" {
-		return nil, errors.New("需要提供 id 或 ip")
-	} else if _, rid := t.FindByIP(ip); rid != "" {
-		id = rid
+	id, ip, err := probeTarget(t, a)
+	if err != nil {
+		return nil, err
 	}
 	p4 := net.ParseIP(ip).To4()
-	if p4 == nil {
-		return nil, fmt.Errorf("%q 不是 IPv4 地址", ip)
-	}
-	if p4.IsUnspecified() || p4.IsMulticast() || p4.Equal(net.IPv4bcast) {
-		return nil, errors.New("不能 ping 广播、组播或全零地址")
-	}
-	if _, nw, err := net.ParseCIDR(t.Site.Subnet); err == nil && len(nw.Mask) == 4 {
-		bc := make(net.IP, 4)
-		for i := range bc {
-			bc[i] = nw.IP.To4()[i] | ^nw.Mask[i]
-		}
-		if p4.Equal(bc) {
-			return nil, errors.New("不能 ping 网段广播地址")
-		}
-	}
 	count := clampInt(argInt(a, "count", 5), 1, 10)
 	timeout := time.Duration(clampInt(argInt(a, "timeout_ms", 1000), 200, 3000)) * time.Millisecond
 	size := clampInt(argInt(a, "size", 32), 8, 1472)
@@ -455,15 +427,7 @@ func toolPingNow(s *Server, a map[string]json.RawMessage, _ string) (interface{}
 	if lastErr != "" {
 		res["error"] = lastErr
 	}
-	if id != "" {
-		name, _, attach := deviceLabel(t, id)
-		res["device"] = map[string]interface{}{"id": id, "name": name, "attach": attach}
-		if st, ok := s.Mon.Status(id); ok {
-			res["monitor"] = map[string]interface{}{"state": st.State, "avg_1m_ms": st.Avg1m, "loss_1m_pct": st.Loss1m, "loss_1h_pct": st.Loss1h}
-		}
-	} else {
-		res["device"] = "不在拓扑中的地址"
-	}
+	res["device"] = s.deviceRef(t, id)
 	return res, nil
 }
 

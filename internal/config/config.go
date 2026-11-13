@@ -120,7 +120,11 @@ type AIConfig struct {
 	Thinking   bool   `yaml:"thinking" json:"thinking"`
 	ProxyURL   string `yaml:"proxy_url" json:"proxy_url"`
 	TimeoutSec int    `yaml:"timeout_sec" json:"timeout_sec"`
+	SelfCheck  *bool  `yaml:"self_check,omitempty" json:"self_check,omitempty"` // 回答前自检，未设置时默认开启
 }
+
+// SelfCheckOn 是否在给出诊断结论前自检（默认开启）。
+func (a AIConfig) SelfCheckOn() bool { return a.SelfCheck == nil || *a.SelfCheck }
 
 // Config 对应 config.yaml。
 type Config struct {
@@ -405,6 +409,7 @@ const header = `# netPing 程序配置（修改 listen / topology_file 后需重
 #   thinking             深度思考模式（更慢、更贵，复杂问题时可开启）
 #   proxy_url            HTTP 代理，留空时使用 alert.proxy_url
 #   timeout_sec          单次诊断最长时间（秒）
+#   self_check           回答前自检（默认 true）：模型写完初稿后逐条核对依据，必要时调用工具实测，再给出通过或修正后的回答
 # ping.*                 节点未单独设置时的默认值：
 #   interval_ms          ping 间隔（毫秒，最小 200）
 #   timeout_ms           单次超时（毫秒）
