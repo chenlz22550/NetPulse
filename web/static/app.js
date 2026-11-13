@@ -452,6 +452,8 @@
       ['最近 1 小时', '最近 1 小时哪些设备最不稳定？按严重程度排序，给出可能原因。'],
       ['网关与核心', '网关和核心交换机现在是否正常？对比最近 24 小时有没有变差。'],
       ['分析告警', '分析最近的告警记录：有没有反复离线的设备或同时发生的故障？可能的根因是什么？'],
+      ['找公共故障点', '现在异常的设备是不是同一台交换机、同一个端口或同一条上联下面的？帮我找出最可能的公共故障点。'],
+      ['掉线规律', '最近 7 天哪些设备最不稳定？有没有每天固定时段掉线、或者多台设备同时掉线的情况？'],
       ['夜间巡检', '按夜间巡检的口径总结一下网络健康状况，列出需要明天处理的事项。'],
     ];
     app.innerHTML = `<div class="page pad"><div class="ai">
@@ -637,7 +639,7 @@
         const all = S.topo ? S.topo.nodes.concat(S.topo.switches) : [];
         const d = all.find(x => x.id === focusID);
         const label = d ? [d.name, d.ip].filter(Boolean).join(' ') || d.id : focusID;
-        if (a.ready) ask(`诊断设备 ${label}：它现在是否正常？最近有没有异常？如果有，分析可能原因并给出排查步骤。`, focusID);
+        if (a.ready) ask(`诊断设备 ${label}：它现在是否正常？最近有没有异常（中断时段、和昨天比有没有变差）？上联路径是否正常？如果有问题，分析可能原因并给出排查步骤。`, focusID);
         else toast('请先在右侧设置 API Key', true);
       }
     }).catch(e => toast(errMsg(e), true));
@@ -646,6 +648,9 @@
 
   // ---------------------------------------------------------------------------
   // 拓扑页
+  // 设备类别（与服务器 deviceCategories 一致），AI 一键优化把类别写成同名标签
+  const DEVICE_CATS = ['服务器', '虚拟机', '台式机', '笔记本', '手机平板', '打印机', '摄像头', '录像机', '无线AP',
+    '路由器防火墙', '网络存储', 'IP电话', '门禁考勤', '智能设备', '工控设备', '其他'];
   function topoPage(app) {
     app.innerHTML = `
     <div class="topo">
@@ -656,6 +661,7 @@
           <button class="btn small" id="addNode">+ 节点</button>
           <button class="btn small" id="addLink">+ 链路</button>
           <button class="btn small" id="autoLayout" title="清除所有节点的手动坐标：已接线的按端口排列，未定位的按 IP 整齐排在下方">自动排布</button>
+          <button class="btn small accent" id="aiOpt" title="AI 结合设备资料与近 7 天历史数据：自动分类设备、给出配置建议、找出需要检查的设备。建议需勾选后才会应用，可撤销">✦ AI 一键优化</button>
         </div>
         <div class="canvas-tools right">
           <button class="btn small" id="zIn">+</button><button class="btn small" id="zOut">−</button><button class="btn small" id="zFit">适配</button>
@@ -799,6 +805,7 @@
         if (f === 'gw' && !(flags.includes('gateway') || flags.includes('critical') || flags.includes('jump_host'))) return false;
         if (f === 'multi' && !(n.attach.switch && portCount[n.attach.switch + '|' + n.attach.port] > 1)) return false;
         if (f.startsWith('sw:') && n.attach.switch !== f.slice(3)) return false;
+        if (f.startsWith('cat:') && !(n.tags || []).includes(f.slice(4))) return false;
         if (qs) {
           const hay = [n.ip, n.mac, n.vendor, n.name, n.hostname, n.location, n.note, attachLabel(n), (n.tags || []).join(' '), n.id].join(' ').toLowerCase();
           const qn = qs.replace(/^\./, '');
@@ -816,6 +823,8 @@
     function renderChips() {
       const chips = [['all', '全部'], ['abn', '异常'], ['alert', '已开告警'], ['multi', '多 MAC 端口'], ['sus', '存疑 / 未定位'], ['gw', '网关 / 关键']];
       S.topo.switches.forEach(sw => chips.push(['sw:' + sw.id, sw.name || sw.id]));
+      const cats = DEVICE_CATS.filter(c => S.topo.nodes.some(n => (n.tags || []).includes(c)));
+      cats.forEach(c => chips.push(['cat:' + c, c]));
       $('#chips').innerHTML = chips.map(([k, t]) => `<button class="chip${S.filter === k ? ' on' : ''}${k === 'sus' ? ' dashed' : ''}" data-k="${esc(k)}">${esc(t)}</button>`).join('');
       $$('#chips .chip').forEach(b => b.onclick = () => { S.filter = b.dataset.k; renderChips(); applyMatch(); });
     }
@@ -845,6 +854,189 @@
       <svg width="44" height="16"><defs><pattern id="h2" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="5" stroke="#8a857a"/></pattern></defs><rect x="1" y="1" width="42" height="14" fill="url(#h2)" stroke="#4a4740"/></svg><span>存疑：复扫未见 / 信息待核实</span>
       <svg width="44" height="16"><rect x="1" y="1" width="42" height="14" fill="#fff" stroke="#d63a22" stroke-width="2"/></svg><span>离线（红框）/ 丢包或延迟高（橙框）</span>`;
 
+    // ---- AI 一键优化：分类、配置建议、需要检查的设备 ----
+    let opt = null; // { busy: AbortController, el }
+    $('#aiOpt').onclick = () => openOpt(false);
+    function locateDevice(id) {
+      const n = S.topo.nodes.find(x => x.id === id), sw = S.topo.switches.find(x => x.id === id);
+      if (!n && !sw) { toast('设备已不存在', true); return; }
+      closeOpt();
+      S.sel = { kind: n ? 'node' : 'switch', id };
+      view.setSelection(S.sel);
+      renderDetail();
+      if (n) { q.value = n.ip || n.id; S.search = q.value; applyMatch(); }
+    }
+    function closeOpt() {
+      if (!opt) return;
+      if (opt.busy) opt.busy.abort();
+      opt.el.remove();
+      document.removeEventListener('keydown', opt.onKey, true);
+      opt = null;
+    }
+    function openOpt(rerun) {
+      if (!opt) {
+        const el = document.createElement('div');
+        el.className = 'modal-mask';
+        el.innerHTML = `<div class="modal aiopt"><div class="mh"><b>✦ AI 一键优化</b><span class="muted" id="optMeta"></span>
+          <button class="btn small r" id="optClose">关闭</button></div><div class="mb" id="optBody"></div><div class="mf" id="optFoot"></div></div>`;
+        document.body.appendChild(el);
+        el.addEventListener('mousedown', ev => { if (ev.target === el && !(opt && opt.busy)) closeOpt(); });
+        const onKey = ev => { if (ev.key === 'Escape') { ev.stopPropagation(); closeOpt(); } };
+        document.addEventListener('keydown', onKey, true);
+        opt = { el, onKey };
+        $('#optClose').onclick = closeOpt;
+      }
+      let saved = null;
+      try { saved = JSON.parse(sessionStorage.getItem('np_aiopt') || 'null'); } catch (e) { saved = null; }
+      if (saved && !rerun) drawOpt(saved); else runOpt();
+    }
+    async function runOpt() {
+      const body = $('#optBody'), foot = $('#optFoot');
+      const st = { status: '正在连接…', tools: [], text: '', error: '' };
+      const draw = () => {
+        if (!opt) return;
+        const pre = st.text.split('```')[0].trim();
+        body.innerHTML = `<div class="help" style="margin-top:0">AI 会读取全部设备的厂商、主机名、接线、告警设置和近 7 天的丢包/延迟/中断统计，
+            给出：<b>设备分类</b>（写成标签）、<b>配置建议</b>、<b>需要检查的设备</b>。所有修改都要你勾选确认后才会应用。设备较多时需要 1~3 分钟。</div>
+          ${st.tools.length ? `<div class="ai-tools">${st.tools.map(t => `<span class="ai-tool">查询 · ${esc(t.title || t.name)}</span>`).join('')}</div>` : ''}
+          ${pre ? `<div class="ai-md">${mdLite(pre)}</div>` : ''}
+          ${st.text.includes('```') && !st.error ? '<div class="ai-status"><span class="ai-spin"></span>正在生成建议清单…</div>' : ''}
+          ${st.status ? `<div class="ai-status"><span class="ai-spin"></span>${esc(st.status)}</div>` : ''}
+          ${st.error ? `<div class="ai-err">${esc(st.error)}</div>` : ''}`;
+      };
+      foot.innerHTML = `<button class="btn" id="optStop">停止</button>`;
+      $('#optMeta').textContent = '';
+      draw();
+      const ctl = new AbortController();
+      opt.busy = ctl;
+      $('#optStop').onclick = () => ctl.abort();
+      let result = null, meta = '';
+      try {
+        const r = await fetch('api/ai/optimize', { method: 'POST', signal: ctl.signal, headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        if (!r.ok) {
+          const d = await r.json().catch(() => ({}));
+          if (r.status === 401 && d.login_required) { toLogin(); return; }
+          throw new Error(d.error || 'HTTP ' + r.status);
+        }
+        const rd = r.body.getReader(), dec = new TextDecoder();
+        let buf = '';
+        for (;;) {
+          const { value, done } = await rd.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          let k;
+          while ((k = buf.indexOf('\n')) >= 0) {
+            const line = buf.slice(0, k).trim();
+            buf = buf.slice(k + 1);
+            if (!line) continue;
+            let ev;
+            try { ev = JSON.parse(line); } catch (e) { continue; }
+            if (ev.t === 'status') st.status = ev.text;
+            else if (ev.t === 'stats') st.status = `已汇总 ${ev.stats.nodes} 个节点、${ev.stats.switches} 台交换机（${ev.stats.with_stats} 台有历史数据），正在请求模型…`;
+            else if (ev.t === 'delta') { st.text += ev.text; st.status = ''; }
+            else if (ev.t === 'break') st.text = '';
+            else if (ev.t === 'tool') { st.tools.push(ev); st.status = '正在查询 ' + (ev.title || ev.name) + '…'; }
+            else if (ev.t === 'error') { st.error = ev.error; st.status = ''; }
+            else if (ev.t === 'result') result = ev.result;
+            else if (ev.t === 'done') meta = `${ev.model} · ${(ev.ms / 1000).toFixed(1)} 秒 · 查询 ${ev.tools} 次 · ${(ev.usage || {}).total_tokens || 0} tokens`;
+            draw();
+          }
+        }
+        if (!result && !st.error) st.error = '模型没有返回结果，请重试。';
+      } catch (e) {
+        st.error = e.name === 'AbortError' ? '已停止' : errMsg(e);
+      } finally {
+        if (opt) opt.busy = null;
+      }
+      if (!opt) return;
+      if (result) {
+        result.meta = meta;
+        sessionStorage.setItem('np_aiopt', JSON.stringify(result));
+        drawOpt(result);
+      } else {
+        st.status = '';
+        draw();
+        foot.innerHTML = `<button class="btn primary" id="optRetry">重试</button>`;
+        $('#optRetry').onclick = runOpt;
+      }
+    }
+    function drawOpt(res) {
+      const body = $('#optBody'), foot = $('#optFoot');
+      $('#optMeta').textContent = `  ${res.time || ''}${res.meta ? ' · ' + res.meta : ''}`;
+      const cls = res.classify || [], cfg = res.config || [], chk = res.check || [];
+      const nCls = cls.reduce((a, g) => a + g.devices.length, 0);
+      const pri = { high: ['down', '高'], medium: ['slow', '中'], low: ['unknown', '低'] };
+      body.innerHTML = `
+        ${res.summary ? `<div class="ai-md">${mdLite(res.summary)}</div>` : ''}
+        <div class="opt-sec"><h4>1 · 设备分类 <span class="muted">${nCls} 台 · 作为标签写入，可在拓扑页按类别筛选</span>
+          ${nCls ? '<label class="r"><input type="checkbox" id="optAllC" checked> 全选</label>' : ''}</h4>
+          ${cls.length ? cls.map((g, gi) => `<div class="opt-grp">
+            <label class="opt-gh"><input type="checkbox" class="optG" data-g="${gi}" checked> <b>${esc(g.category)}</b> ${g.devices.length} 台
+              <span class="muted">${esc(g.reason || '')}</span></label>
+            <div class="opt-devs">${g.devices.map((d, di) => `<label class="opt-dev" title="${esc(d.id)}"><input type="checkbox" class="optC" data-g="${gi}" data-d="${di}" checked>
+              ${esc(d.label || d.id)}${d.current ? ` <span class="muted">（原 ${esc(d.current)}）</span>` : ''}</label>`).join('')}</div></div>`).join('')
+            : '<div class="help">没有需要新分类的设备。</div>'}
+        </div>
+        <div class="opt-sec"><h4>2 · 配置建议 <span class="muted">${cfg.length} 条</span>
+          ${cfg.some(c => c.applicable) ? '<label class="r"><input type="checkbox" id="optAllS"> 全选</label>' : ''}</h4>
+          ${cfg.length ? `<table class="grid flat opt-tbl"><tbody>${cfg.map((c, i) => `<tr>
+            <td style="width:24px">${c.applicable ? `<input type="checkbox" class="optS" data-i="${i}" ${c.action === 'monitor_off' ? '' : 'checked'}>` : ''}</td>
+            <td style="white-space:nowrap"><span class="badge ${c.applicable ? 'solid' : 'unknown'}">${esc(c.title)}</span></td>
+            <td>${c.label ? `<a href="javascript:void 0" class="optLoc" data-id="${esc(c.id)}">${esc(c.label)}</a>` : '<span class="muted">全局</span>'}
+              ${c.change ? `<div><b>${esc(c.change)}</b></div>` : ''}<div class="muted">${esc(c.reason || '')}</div></td></tr>`).join('')}</tbody></table>`
+            : '<div class="help">当前配置没有需要调整的地方。</div>'}
+        </div>
+        <div class="opt-sec"><h4>3 · 建议检查的设备 <span class="muted">${chk.length} 台 · 依据近 7 天历史数据</span></h4>
+          ${chk.length ? chk.map(c => `<div class="opt-chk">
+            <div><span class="badge ${pri[c.priority][0]}">${pri[c.priority][1]}</span> <b>${esc(c.label)}</b> <span class="muted">${esc(c.attach || '')}</span>
+              <span class="r btns" style="margin:0"><button class="btn small optLoc" data-id="${esc(c.id)}">在图中定位</button>
+              <a class="btn small" href="#/node/${encodeURIComponent(c.id)}">曲线</a>
+              <a class="btn small" href="#/ai/${encodeURIComponent(c.id)}">AI 诊断</a></span></div>
+            <div>${esc(c.reason || '')}</div>${c.steps ? `<div class="muted">检查：${esc(c.steps)}</div>` : ''}</div>`).join('')
+            : '<div class="help">近 7 天没有明显需要检查的设备。</div>'}
+        </div>`;
+      const count = () => $$('.optC:checked', body).length + $$('.optS:checked', body).length;
+      const upd = () => {
+        const b = $('#optApply');
+        if (b) { const n = count(); b.disabled = !n; b.textContent = `应用所选（${n}）`; }
+        const sync = (all, sel) => { if (all) { const xs = $$(sel, body); all.checked = xs.length > 0 && xs.every(x => x.checked); } };
+        sync($('#optAllC'), '.optC'); sync($('#optAllS'), '.optS');
+        $$('.optG', body).forEach(g => { g.checked = $$(`.optC[data-g="${g.dataset.g}"]`, body).every(x => x.checked); });
+      };
+      foot.innerHTML = `<button class="btn primary" id="optApply">应用所选</button><button class="btn" id="optRerun">重新分析</button>
+        <span class="muted" style="margin-left:auto">应用后可在提示中撤销</span>`;
+      $$('.optG', body).forEach(g => g.onchange = () => { $$(`.optC[data-g="${g.dataset.g}"]`, body).forEach(x => { x.checked = g.checked; }); upd(); });
+      $$('.optC', body).forEach(x => x.onchange = upd);
+      $$('.optS', body).forEach(x => x.onchange = upd);
+      const allC = $('#optAllC'), allS = $('#optAllS');
+      if (allC) allC.onchange = () => { $$('.optC, .optG', body).forEach(x => { x.checked = allC.checked; }); upd(); };
+      if (allS) allS.onchange = () => { $$('.optS', body).forEach(x => { x.checked = allS.checked; }); upd(); };
+      $$('.optLoc', body).forEach(a => a.onclick = () => locateDevice(a.dataset.id));
+      $('#optRerun').onclick = runOpt;
+      $('#optApply').onclick = async () => {
+        const classify = $$('.optC:checked', body).map(x => ({ id: cls[+x.dataset.g].devices[+x.dataset.d].id, category: cls[+x.dataset.g].category }));
+        const config = $$('.optS:checked', body).map(x => cfg[+x.dataset.i]);
+        try {
+          const r = await api('POST', 'api/ai/optimize/apply', { classify, config });
+          // 已应用的从清单中移除
+          const doneC = new Set(classify.map(c => c.id + '|' + c.category));
+          res.classify = cls.map(g => ({ ...g, devices: g.devices.filter(d => !doneC.has(d.id + '|' + g.category)) })).filter(g => g.devices.length);
+          res.config = cfg.filter(c => !config.includes(c));
+          sessionStorage.setItem('np_aiopt', JSON.stringify(res));
+          await loadTopology();
+          if (opt) drawOpt(res);
+          const undo = r.undo || [];
+          toast(`已应用：修改了 ${r.changed} 台设备${r.skipped ? `，${r.skipped} 条已失效被跳过` : ''}`, false, undo.length ? {
+            label: '撤销', fn: async () => {
+              try { await api('POST', 'api/ai/optimize/apply', { restore: undo }); await loadTopology(); toast('已撤销本次修改（可点「重新分析」重新生成建议）'); }
+              catch (e) { toast(errMsg(e), true); }
+            },
+          } : null);
+        } catch (e) { toast(errMsg(e), true); }
+      };
+      upd();
+    }
+
     function onTopology() {
       view.setTopology(S.topo);
       renderChips(); renderLegend(); applyMatch(); renderOverview();
@@ -856,7 +1048,7 @@
     return {
       onTopology,
       update() { view.refresh(); renderOverview(); updateLive(); if (S.filter === 'abn') applyMatch(); },
-      destroy() { S.pick = null; document.removeEventListener('keydown', onKey); window.removeEventListener('resize', onResize); },
+      destroy() { closeOpt(); S.pick = null; document.removeEventListener('keydown', onKey); window.removeEventListener('resize', onResize); },
     };
   }
 
