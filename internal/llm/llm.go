@@ -238,6 +238,10 @@ func (c *Client) Stream(ctx context.Context, req Request, onDelta func(string)) 
 				}
 			}
 			for _, tc := range d.ToolCalls {
+				// 索引来自模型服务，限制范围以避免负下标崩溃或异常内存分配。
+				if tc.Index < 0 || tc.Index >= 128 {
+					return out, usage, fmt.Errorf("模型工具调用索引无效: %d（允许 0~127）", tc.Index)
+				}
 				for len(calls) <= tc.Index {
 					calls = append(calls, ToolCall{Type: "function"})
 				}
