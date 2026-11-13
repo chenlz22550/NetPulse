@@ -162,6 +162,25 @@ func (s *Service) client(tg Target) (*snmp.Client, error) {
 	return c, nil
 }
 
+// Dial 按交换机 id 建立 SNMP 连接（使用端口定位的读取地址与团体名），调用方负责 Close。
+func (s *Service) Dial(switchID string) (*snmp.Client, error) {
+	for _, tg := range s.Targets() {
+		if tg.Switch == switchID {
+			return s.client(tg)
+		}
+	}
+	t, _ := s.Topo.Snapshot()
+	sw := t.FindSwitch(switchID)
+	if sw == nil {
+		return nil, fmt.Errorf("交换机 %q 不存在", switchID)
+	}
+	name := sw.Name
+	if name == "" {
+		name = sw.ID
+	}
+	return nil, fmt.Errorf("交换机 %s 没有可用的 SNMP 设置（管理 IP 或团体名为空，或已停用），无法读取端口状态：请在「端口定位」页设置只读团体名", name)
+}
+
 // readAll 并行读取所有交换机的 MAC 表。
 func (s *Service) readAll(targets []Target) (map[string]*snmp.Table, []SwitchStatus) {
 	tables := map[string]*snmp.Table{}

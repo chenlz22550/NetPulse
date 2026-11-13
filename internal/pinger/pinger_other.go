@@ -52,4 +52,45 @@ func (execPinger) Ping(ip string, timeout time.Duration, size int) (Result, erro
 	return Result{OK: true, RTT: elapsed}, nil
 }
 
+var (
+	ttlExceededRe = regexp.MustCompile(`(?i)from ([0-9.]+)[: ].*(time to live exceeded|ttl exceeded)`)
+	unreachableRe = regexp.MustCompile(`(?i)from ([0-9.]+)[: ].*unreachable`)
+	replyFromRe   = regexp.MustCompile(`bytes from ([0-9.]+)`)
+)
+
+// PingTTL 调用系统 ping 并指定 TTL（开发调试用）。
+func (execPinger) PingTTL(ip string, ttl int, timeout time.Duration) (Hop, error) {
+	ms := int(timeout / time.Millisecond)
+	if ms < 1 {
+		ms = 1
+	}
+	var args []string
+	if runtime.GOOS == "darwin" {
+		args = []string{"-n", "-c", "1", "-m", strconv.Itoa(ttl), "-W", strconv.Itoa(ms), ip}
+	} else {
+		args = []string{"-n", "-c", "1", "-t", strconv.Itoa(ttl), "-W", strconv.Itoa((ms + 999) / 1000), ip}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout+2*time.Second)
+	defer cancel()
+	start := time.Now()
+	out, _ := exec.CommandContext(ctx, "ping", args...).CombinedOutput()
+	elapsed := time.Since(start)
+	if m := ttlExceededRe.FindSubmatch(out); m != nil {
+		return Hop{From: string(m[1]), RTT: elapsed}, nil
+	}
+	if m := unreachableRe.FindSubmatch(out); m != nil {
+		return Hop{From: string(m[1]), Status: "目标不可达", RTT: elapsed}, nil
+	}
+	if m := replyFromRe.FindSubmatch(out); m != nil {
+		h := Hop{From: string(m[1]), Reached: true, RTT: elapsed}
+		if t := timeRe.FindSubmatch(out); t != nil {
+			if v, err := strconv.ParseFloat(string(t[1]), 64); err == nil {
+				h.RTT = time.Duration(v * float64(time.Millisecond))
+			}
+		}
+		return h, nil
+	}
+	return Hop{}, nil
+}
+
 func (execPinger) Close() error { return nil }
