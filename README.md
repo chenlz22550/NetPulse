@@ -59,7 +59,7 @@
 
 ## AI 诊断
 
-「AI 诊断」页（`config.yaml` 的 `ai` 段）调用 OpenAI 兼容的大模型接口，默认 DeepSeek `deepseek-flash`（`https://api.deepseek.com`）：
+「AI 诊断」页（`config.yaml` 的 `ai` 段）支持 OpenAI Chat Completions、OpenAI Responses、Anthropic Claude Messages、Google Gemini 四种常见大模型协议（`ai.protocol`），默认 DeepSeek `deepseek-flash`（`https://api.deepseek.com`）：
 
 1. 在页面右侧填写 API Key，点「测试连接」。服务器不能直接上网时填写 HTTP 代理（留空使用告警设置里的代理）。
 2. 点「一键诊断」等快捷按钮或直接描述现象；在设备详情点「AI 诊断」可诊断单台设备。
@@ -118,7 +118,7 @@ AI 客户端连接需要访问令牌：在「MCP」页点「生成」并保存�
 | 现场核实 | get_switch_ports、tcp_check、arp_lookup、trace_route、dns_lookup |
 | 端口定位 | get_locate_status、get_switch_mac_table、locate_device、auto_locate（可只预览）、apply_location、test_switch_snmp、set_locate_settings |
 | 扫描 | upsert_scan_job、delete_scan_job、scan_network（可临时扫描指定网段）、set_discovery_settings、add_discovered_devices、apply_ip_suggestion |
-| 设置 | set_alert_config、send_test_alert、set_ping_defaults、set_site、set_schedule、set_monitoring_paused、set_ai_settings（AI 启用、深度思考、回答前自检、模型、超时；不能改 API Key / 接口地址 / 代理） |
+| 设置 | set_alert_config、send_test_alert、set_ping_defaults、set_site、set_schedule、set_monitoring_paused、set_ai_settings（AI 启用、协议格式、深度思考、回答前自检、模型、超时；不能改 API Key / 接口地址 / 代理） |
 | 修改 | reset_layout、upsert_device、delete_device、upsert_switch、delete_switch、upsert_link、delete_link、set_alerting、replace_topology_yaml（默认只校验）、reload_topology_from_disk |
 
 另提供资源（当前拓扑、字段说明、JSON Schema、实时状态）和提示词模板 `generate_topology`（按 MAC/ARP 表生成拓扑）、`health_report`（网络健康报告）。

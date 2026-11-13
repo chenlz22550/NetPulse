@@ -98,16 +98,16 @@ func TestMCPProbeTools(t *testing.T) {
 	cf := s.Cfg.Get()
 	cf.AI.APIKey = "sk-secret-999"
 	_ = s.Cfg.Update(cf)
-	if txt, isErr := call(t, ts, "set_ai_settings", map[string]interface{}{"self_check": false, "thinking": true}); isErr || !strings.Contains(txt, `"self_check": false`) || strings.Contains(txt, "sk-secret") {
+	if txt, isErr := call(t, ts, "set_ai_settings", map[string]interface{}{"protocol": "gemini", "self_check": false, "thinking": true}); isErr || !strings.Contains(txt, `"self_check": false`) || !strings.Contains(txt, `"protocol": "gemini"`) || strings.Contains(txt, "sk-secret") {
 		t.Fatalf("set_ai_settings: %s", txt)
 	}
-	if c := s.Cfg.Get().AI; c.SelfCheckOn() || !c.Thinking {
+	if c := s.Cfg.Get().AI; c.SelfCheckOn() || !c.Thinking || c.Protocol != "gemini" {
 		t.Fatalf("config not updated: %+v", c)
 	}
 	if txt, _ := call(t, ts, "get_settings", map[string]interface{}{}); !strings.Contains(txt, `"self_check": false`) || strings.Contains(txt, "sk-secret") {
 		t.Fatalf("get_settings: %s", txt)
 	}
-	for _, bad := range []map[string]interface{}{{"api_key": "sk-x"}, {"base_url": "http://evil"}, {"timeout_sec": 5}, {}} {
+	for _, bad := range []map[string]interface{}{{"api_key": "sk-x"}, {"base_url": "http://evil"}, {"protocol": "bad-proto"}, {"timeout_sec": 5}, {}} {
 		if txt, isErr := call(t, ts, "set_ai_settings", bad); !isErr {
 			t.Fatalf("%v should fail: %s", bad, txt)
 		}

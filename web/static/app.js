@@ -605,6 +605,13 @@
 
     function drawSettings() {
       const a = settings;
+      const PROTOCOLS = [
+        ['openai', 'OpenAI Chat Completions', 'https://api.deepseek.com', 'deepseek-flash', '大多数模型与中转站（/chat/completions）'],
+        ['openai-responses', 'OpenAI Responses', 'https://api.openai.com/v1', 'gpt-5', 'OpenAI 新版 Responses 接口（/responses）'],
+        ['anthropic', 'Anthropic (Claude)', 'https://api.anthropic.com', 'claude-sonnet-4-5', 'Claude 原生 Messages 接口（/v1/messages）'],
+        ['gemini', 'Google Gemini', 'https://generativelanguage.googleapis.com', 'gemini-2.5-flash', 'Gemini 原生接口（/v1beta/models/...）'],
+      ];
+      const curProto = a.protocol || 'openai';
       $('#aiState').innerHTML = a.ready ? '<span class="badge ok">可用</span>' : a.api_key_set ? '<span class="badge unknown">已停用</span>' : '<span class="badge slow">未设置 Key</span>';
       $('#aiModel').textContent = a.ready ? '  ' + a.model + (a.thinking ? ' · 深度思考' : '') : '';
       $('#aiSet').innerHTML = `
@@ -613,16 +620,27 @@
           <label title="写完回答后逐条核对数据，必要时实测（ping、端口、交换机端口状态），发现问题自动修正；会多一次模型调用"><input type="checkbox" name="self_check" ${a.self_check ? 'checked' : ''}> 回答前自检</label></div>
         <label class="f"><span>API Key${a.api_key_set ? `（已设置 ${esc(a.api_key_hint)}，留空不修改）` : ''}</span>
           <button class="btn ai-key-unlock" type="button" id="aiKeyUnlock">${a.api_key_set ? '点击修改 API Key' : '点击填写 API Key'}</button></label>
+        <label class="f"><span>协议格式</span><select name="protocol">${PROTOCOLS.map(([v, t]) => `<option value="${v}"${v === curProto ? ' selected' : ''}>${t}</option>`).join('')}</select></label>
         <div class="row2">
           <label class="f"><span>模型</span><input type="text" name="model" value="${esc(a.model)}"></label>
           <label class="f"><span>超时（秒）</span><input type="number" name="timeout_sec" min="10" max="600" value="${a.timeout_sec}"></label>
         </div>
-        <label class="f"><span>接口地址（OpenAI 兼容）</span><input type="text" name="base_url" value="${esc(a.base_url)}"></label>
+        <label class="f"><span>接口地址</span><input type="text" name="base_url" value="${esc(a.base_url)}"></label>
         <label class="f"><span>HTTP 代理（留空时使用告警设置里的代理）</span><input type="text" name="proxy_url" value="${esc(a.proxy_url || '')}" placeholder="http://10.0.0.1:3128"></label>
         <div class="btns"><button class="btn primary" type="submit">保存</button><button class="btn" type="button" id="aiTest">测试连接</button>
           ${a.api_key_set ? '<button class="btn danger" type="button" id="aiClrKey">清除 Key</button>' : ''}</div>
-        <div class="help" id="aiTestMsg">默认使用 DeepSeek（deepseek-flash）。Key 保存在 config.yaml，网页和 MCP 都不会把它返回。</div>`;
+        <div class="help" id="aiTestMsg">支持 OpenAI Chat Completions、OpenAI Responses、Anthropic Claude、Google Gemini 协议，默认 DeepSeek（deepseek-flash）。Key 保存在 config.yaml，网页和 MCP 都不会把它返回。</div>`;
       const f = $('#aiSet');
+      const protoSel = f.elements.protocol;
+      const defaultURLs = new Set(PROTOCOLS.map(p => p[2]));
+      const defaultModels = new Set(PROTOCOLS.map(p => p[3]));
+      protoSel.onchange = () => {
+        const hit = PROTOCOLS.find(p => p[0] === protoSel.value);
+        if (!hit) return;
+        const urlEl = f.elements.base_url, modEl = f.elements.model;
+        if (!urlEl.value.trim() || defaultURLs.has(urlEl.value.trim().replace(/\/+$/, ''))) urlEl.value = hit[2];
+        if (!modEl.value.trim() || defaultModels.has(modEl.value.trim())) modEl.value = hit[3];
+      };
       // 未主动解锁前不创建密码框，也不提交 api_key，避免密码管理器自动填充覆盖已保存的 Key。
       let keyInput = null;
       $('#aiKeyUnlock').onclick = ev => {
@@ -636,7 +654,8 @@
         keyInput.focus();
       };
       const body = () => ({
-        enabled: f.elements.enabled.checked, thinking: f.elements.thinking.checked, self_check: f.elements.self_check.checked,
+        enabled: f.elements.enabled.checked, protocol: f.elements.protocol.value,
+        thinking: f.elements.thinking.checked, self_check: f.elements.self_check.checked,
         ...(keyInput ? { api_key: keyInput.value.trim() } : {}),
         model: f.elements.model.value.trim(), timeout_sec: parseInt(f.elements.timeout_sec.value, 10) || 120,
         base_url: f.elements.base_url.value.trim(), proxy_url: f.elements.proxy_url.value.trim(),

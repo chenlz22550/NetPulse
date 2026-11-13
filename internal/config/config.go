@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"gopkg.in/yaml.v3"
+	"netping/internal/llm"
 )
 
 // PingDefaults 是节点未单独设置时使用的默认 ping 参数。
@@ -111,9 +112,10 @@ type MCPConfig struct {
 	Token    string `yaml:"token" json:"token"`
 }
 
-// AIConfig 是 AI 诊断（大模型）配置，使用 OpenAI 兼容的 Chat Completions 接口，默认 DeepSeek。
+// AIConfig 是 AI 诊断（大模型）配置，支持 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages、Google Gemini 协议，默认 DeepSeek。
 type AIConfig struct {
 	Enabled    bool   `yaml:"enabled" json:"enabled"`
+	Protocol   string `yaml:"protocol" json:"protocol"`
 	BaseURL    string `yaml:"base_url" json:"base_url"`
 	Model      string `yaml:"model" json:"model"`
 	APIKey     string `yaml:"api_key" json:"api_key,omitempty"`
@@ -145,7 +147,7 @@ type Config struct {
 func Default() Config {
 	return Config{
 		Listen:        "0.0.0.0:8090",
-		AI:            AIConfig{Enabled: true, BaseURL: "https://api.deepseek.com", Model: "deepseek-flash", TimeoutSec: 120},
+		AI:            AIConfig{Enabled: true, Protocol: llm.ProtocolOpenAI, BaseURL: "https://api.deepseek.com", Model: "deepseek-flash", TimeoutSec: 120},
 		TopologyFile:  "topology.yaml",
 		RetentionDays: 30,
 		MCP:           MCPConfig{Enabled: true},
@@ -184,6 +186,7 @@ func (c *Config) Normalize() {
 	if c.TopologyFile == "" {
 		c.TopologyFile = d.TopologyFile
 	}
+	c.AI.Protocol = llm.NormalizeProtocol(c.AI.Protocol)
 	c.AI.BaseURL = strings.TrimRight(strings.TrimSpace(c.AI.BaseURL), "/")
 	if c.AI.BaseURL == "" {
 		c.AI.BaseURL = d.AI.BaseURL
@@ -402,8 +405,10 @@ const header = `# netPing 程序配置（修改 listen / topology_file 后需重
 #   read_only            只读模式：只能查询，不能修改拓扑、告警开关、监控时段
 #   token                访问令牌，非空时客户端需带请求头 Authorization: Bearer <token>；
 #                        为空时客户端需用 HTTP Basic 认证提供网页登录密码
-# ai.*                   AI 诊断（网页「AI 诊断」页），使用 OpenAI 兼容接口，默认 DeepSeek：
+# ai.*                   AI 诊断（网页「AI 诊断」页），默认 DeepSeek：
 #   enabled              是否启用
+#   protocol             协议格式：openai（OpenAI Chat Completions，默认）/ openai-responses（OpenAI Responses）/
+#                        anthropic（Anthropic Claude Messages）/ gemini（Google Gemini）
 #   base_url / model     接口地址与模型，默认 https://api.deepseek.com、deepseek-flash
 #   api_key              API Key（网页和 MCP 都不会返回它）
 #   thinking             深度思考模式（更慢、更贵，复杂问题时可开启）
