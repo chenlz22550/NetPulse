@@ -65,9 +65,30 @@
 2. 点「一键诊断」等快捷按钮或直接描述现象；在设备详情点「AI 诊断」可诊断单台设备。
 3. 模型先看当前概况，再按需调用只读工具（get_overview、list_devices、get_device、get_history、list_alerts、get_settings、
    get_discovery、get_locate_status、get_switch_mac_table、locate_device）补充数据，流式给出结论、依据和排查步骤。**不能修改任何配置。**
+   另有一组分析工具，让模型不用逐台翻数据就能做关联分析：
+
+   | 工具 | 作用 |
+   |---|---|
+   | analyze_impact | 把当前异常设备按交换机（含下游交换机）和端口归类，找出最靠近核心的公共故障点，并把同一时刻开始异常的设备分组 |
+   | get_uplink_path | 设备到核心交换机的逐跳路径：每跳交换机状态、下挂异常数、上联端口，以及同端口下的其他设备 |
+   | find_outages | 历史中每段离线/丢包的起止时间、时长、丢包率，可用率与累计中断时长，按小时分布（发现固定时段掉线） |
+   | correlate_events | 按分钟对齐多台设备的异常，找出多台同时出问题的时段（按交换机归类）及每台设备与他人同时异常的比例 |
+   | rank_devices | 按 1h/6h/24h/7d 统计丢包率、延迟、中断分钟数、抖动排行，附全网中位数 |
+   | compare_baseline | 与昨天同时段、7 天前同时段、过去 7 天整体对比延迟和丢包的变化幅度 |
+   | ping_now | 从 netPing 主机立即 ping 设备或任意 IPv4 地址（最多 10 次），确认当前是否真的不通或测试外网出口 |
 4. 默认关闭深度思考以加快速度；复杂问题可勾选「深度思考」。每次诊断记录在 `logs/netping.log`（问题摘要、查询次数、token 用量）。
 
 诊断时会把相关设备的 IP、MAC、名称和延迟丢包数据发送给模型服务商。API Key 保存在 `config.yaml`，网页和 MCP 都不会返回它。
+
+### 拓扑页「AI 一键优化」
+
+拓扑页左上角的「✦ AI 一键优化」会把全部设备的厂商、主机名、接线、告警设置和近 7 天的丢包/延迟/中断统计交给模型，生成三类结果：
+
+1. **设备分类**：服务器、台式机、笔记本、手机平板、打印机、摄像头、录像机、无线AP、网络存储、IP电话、门禁考勤等，写成同名标签（每台设备只保留一个类别标签），之后可在拓扑页按类别筛选。
+2. **配置建议**：开/关告警、标记关键设备、补充名称、放宽告警阈值、调整 ping 间隔、停止监控，以及需要人工处理的建议。
+3. **建议检查的设备**：按优先级列出，附依据数据与检查步骤，可一键在图中定位、看曲线或进入 AI 诊断。
+
+所有修改都需要勾选后点「应用所选」才会生效，应用后可在提示中撤销；服务器会再次校验每条建议（设备不存在、参数越界、与现状相同的会被跳过）。
 
 ## MCP 接口（AI 接入）
 
@@ -79,6 +100,7 @@ AI 客户端连接需要访问令牌：在「MCP」页点「生成」并保存�
 | 类别 | 工具 |
 |---|---|
 | 查询 | get_overview、list_devices、get_device、get_history、list_alerts、get_topology、get_settings、get_discovery |
+| 分析 | analyze_impact、get_uplink_path、find_outages、correlate_events、rank_devices、compare_baseline、ping_now |
 | 端口定位 | get_locate_status、get_switch_mac_table、locate_device、auto_locate（可只预览）、apply_location、test_switch_snmp、set_locate_settings |
 | 扫描 | upsert_scan_job、delete_scan_job、scan_network（可临时扫描指定网段）、set_discovery_settings、add_discovered_devices、apply_ip_suggestion |
 | 设置 | set_alert_config、send_test_alert、set_ping_defaults、set_site、set_schedule、set_monitoring_paused |

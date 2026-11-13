@@ -34,6 +34,7 @@ var mcpProtocols = []string{"2025-06-18", "2025-03-26", "2024-11-05"}
 
 const mcpInstructions = `netPing 是机房网络 Ping 监控工具。通过本接口可以：
 1. 查询：get_overview（总体状态与异常设备）、list_devices（设备列表与实时延迟/丢包）、get_device、get_history（历史曲线统计）、list_alerts、get_topology、get_settings。
+   分析（只读）：analyze_impact（异常设备按交换机/端口归类，找公共故障点）、get_uplink_path（设备到核心的逐跳路径）、find_outages（历史中断/丢包时段与可用率）、correlate_events（多设备同时异常）、rank_devices（历史稳定性排行）、compare_baseline（与昨天/上周同时段对比）、ping_now（立即 ping 测试）。
 2. 端口定位：get_locate_status、get_switch_mac_table（交换机每个口学到的 MAC）、locate_device（设备实际插在哪个口）、auto_locate（未定位设备自动挂到端口）、apply_location、test_switch_snmp、set_locate_settings。
 网段扫描（自动扫描模式）：get_discovery 查看扫描任务与结果；upsert_scan_job 新建/修改扫描任务（一个或多个网段，按间隔自动扫描、自动添加新设备）、delete_scan_job、scan_network 立即扫描（可传 subnets 临时扫描）、set_discovery_settings、add_discovered_devices、apply_ip_suggestion。
 3. 管理（非只读模式）：upsert_device / delete_device（终端节点）、upsert_switch / delete_switch、upsert_link / delete_link、reset_layout、set_alerting（开关设备告警）、set_alert_config / send_test_alert（企业微信通道）、set_ping_defaults、set_site、set_schedule（全局监控时段）、set_monitoring_paused、replace_topology_yaml（整体替换，先 dry_run 校验）。
@@ -998,6 +999,7 @@ func init() {
 			},
 		},
 	}
+	mcpTools = append(mcpTools, analysisTools()...)
 }
 
 // ---------------------------------------------------------------------------
