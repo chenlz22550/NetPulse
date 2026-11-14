@@ -515,7 +515,7 @@
       cols[c].forEach((n, r) => rowIdx.set(n.id, r));
     }
 
-    const CW = 160, CH = 48, HGAP = 68, VGAP = 16, PADX = 16, PADY = 16;
+    const CW = 168, CH = 48, HGAP = 92, VGAP = 16, PADX = 16, PADY = 16;
     const isSingleChain = cols.every(c => c.length === 1) && cols.length > 4;
     const WRAP_COLS = 4;
 
@@ -634,7 +634,7 @@
         ${badgeTxt ? `<rect x="${n.x + CW - badgeW - 6}" y="${n.y + 6}" width="${badgeW}" height="15" rx="2" fill="${meta.bg}"/>
           <text x="${n.x + CW - badgeW / 2 - 6}" y="${n.y + 16.5}" text-anchor="middle" font-size="10" font-weight="600" fill="${meta.color}">${esc(badgeTxt)}</text>` : ''}
         <text x="${n.x + 10}" y="${n.y + (subText ? 20 : 28)}" font-size="12" font-weight="600" fill="#1a1a1a">${esc(truncW(n.label, titleMaxW))}</text>
-        ${subText ? `<text x="${n.x + 10}" y="${n.y + 38}" class="axis" font-size="10.5" fill="#4a4740">${esc(truncW(subText, 22))}</text>` : ''}
+        ${subText ? `<text x="${n.x + 10}" y="${n.y + 38}" class="axis" font-size="10.5" fill="#4a4740">${esc(truncW(subText, 25))}</text>` : ''}
       </g>`;
     });
 
@@ -675,7 +675,7 @@
     const maxLw = Math.max(...items.map(x => strW(x.label)), 8);
     const hasNote = items.some(x => x.note);
     const left = Math.min(200, Math.max(104, Math.round(maxLw * 6.8 + 18)));
-    const right = hasNote ? 150 : 86;
+    const right = hasNote ? 186 : 86;
     const top = threshold != null && threshold > 0 ? 22 : 10;
     const bottom = 22;
     const ROW_H = 28;
@@ -711,7 +711,7 @@
         <rect x="${left}" y="${by}" width="${w}" height="${bh}" rx="1" fill="#ebe6da"/>
         ${bw > 0 ? `<rect x="${left}" y="${by}" width="${bw.toFixed(1)}" height="${bh}" rx="1" fill="${meta.color}"/>` : ''}
         <text x="${(left + bw + 6).toFixed(1)}" y="${ry + 17.5}" class="axis" font-size="11" fill="#1a1a1a">
-          <tspan font-weight="600">${esc(valStr)}</tspan>${it.note ? `<tspan fill="#8a857a"> · ${esc(truncW(it.note, 16))}</tspan>` : ''}
+          <tspan font-weight="600">${esc(valStr)}</tspan>${it.note ? `<tspan fill="#8a857a"> · ${esc(truncW(it.note, 22))}</tspan>` : ''}
         </text>
       </g>`;
     });
