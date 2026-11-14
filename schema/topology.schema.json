@@ -76,6 +76,7 @@
       "properties": {
         "id": { "$ref": "#/$defs/id" },
         "name": { "type": "string" },
+        "type": { "enum": ["switch", "router", "firewall", "gateway", "modem", "ap", "ac", "lb", "other"], "default": "switch", "description": "设备类型：交换机、路由器、防火墙、上网行为管理、光猫、无线AP、无线控制器、负载均衡、其他；留空为交换机" },
         "role": { "enum": ["core", "aggregation", "access", "other"], "default": "access" },
         "layer": { "type": "string", "description": "L2 / L3，仅展示" },
         "vendor": { "type": "string" },

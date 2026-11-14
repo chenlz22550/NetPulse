@@ -121,6 +121,8 @@
   function stateBadge(st) { const s = st || 'disabled'; return `<span class="badge ${s}">${STATE_TXT[s] || s}</span>`; }
 
   function swName(id) { const s = S.topo && S.topo.switches.find(x => x.id === id); return s ? (s.name || s.id) : id; }
+  // 下拉框里的设备名：非交换机附上类型，如“出口 · 防火墙”
+  function swLabel(s) { const t = TopoTypes.of(s); return (s.name || s.id) + (t === 'switch' ? '' : ' · ' + TopoTypes.info[t].name); }
   function attachLabel(n) {
     if (!n.attach || !n.attach.switch) return '未定位';
     return swName(n.attach.switch) + (n.attach.port ? ' ' + n.attach.port : '');
@@ -296,6 +298,7 @@
           <li>交换机竖着画，网口按实物排列：<b>每排左边奇数口、右边偶数口</b>，每 8 个口一组，光口（SFP）单独放在下面。</li>
           <li>网口指示灯：<span class="g-dot ok"></span>设备在线 <span class="g-dot warn"></span>丢包 / 延迟高 <span class="g-dot down"></span>离线，级联口用主题色表示。鼠标停在网口上可看到端口名和下面挂了哪些设备。</li>
           <li>交换机底部显示已用口数，如 <code>17/30 口</code>。</li>
+          <li>路由器、防火墙、上网行为管理、光猫、无线 AP、无线控制器、负载均衡也用同样的机身画法，左上角图标和色条区分类型（见右侧「图例符号」）；它们和交换机一样可以接终端、互相连线，比如 <b>光猫 → 防火墙 → 核心交换机</b>。用工具栏「+ 网络设备」添加，选择类型后自动填入常用端口。</li>
         </ul>
         <h4>设备卡片</h4>
         <ul>
@@ -314,7 +317,7 @@
           <li>拖动空白处平移，滚轮缩放，拖动卡片或交换机标题调整位置（自动保存）。快捷键：${kbd('/')} 检索、${kbd('Esc')} 清除、${kbd('F')} 适配窗口。</li>
           <li><b>双击</b>卡片查看这台设备的延迟曲线；单击后在右侧「详情」里编辑。</li>
           <li><b>快速接线</b>：先点交换机上的网口，再点设备卡片，设备就接到这个口并排到它旁边（可撤销）；按住 ${kbd('Shift')} 点卡片可以连续把多台接到同一个口，${kbd('Esc')} 取消。</li>
-          <li>工具栏「+ 交换机 / + 节点 / + 链路」新增；「自动排布」把拖乱的卡片恢复为按端口排列，未定位的设备按 IP 整齐排在下方，10 秒内可点「撤销」。</li>
+          <li>工具栏「+ 网络设备 / + 节点 / + 链路」新增；「自动排布」把拖乱的卡片恢复为按端口排列，未定位的设备按 IP 整齐排在下方，10 秒内可点「撤销」。</li>
           <li>交换机的编辑表单里可以设置端口列表、终端卡片显示在左侧还是右侧、每个端口的卡片列数、端口物理位置对照。</li>
           <li>右侧「检索 / 筛选」可按 IP、MAC、厂商、端口、名称搜索，或筛选异常、已开告警、多 MAC 端口等。</li>
         </ul>
@@ -756,14 +759,14 @@
   // 拓扑页
   // 设备类别（与服务器 deviceCategories 一致），AI 一键优化把类别写成同名标签
   const DEVICE_CATS = ['服务器', '虚拟机', '台式机', '笔记本', '手机平板', '打印机', '摄像头', '录像机', '无线AP',
-    '路由器防火墙', '网络存储', 'IP电话', '门禁考勤', '智能设备', '工控设备', '其他'];
+    '路由器防火墙', '光猫', '网络存储', 'IP电话', '门禁考勤', '智能设备', '工控设备', '其他'];
   function topoPage(app) {
     app.innerHTML = `
     <div class="topo">
       <div class="canvas-wrap">
         <svg id="topoSvg"></svg>
         <div class="canvas-tools left">
-          <button class="btn primary small" id="addSw">+ 交换机</button>
+          <button class="btn primary small" id="addSw" title="交换机、路由器、防火墙、光猫、无线 AP 等带端口、可连线的设备">+ 网络设备</button>
           <button class="btn small" id="addNode">+ 节点</button>
           <button class="btn small" id="addLink">+ 链路</button>
           <button class="btn small" id="autoLayout" title="清除所有节点的手动坐标：已接线的按端口排列，未定位的按 IP 整齐排在下方">自动排布</button>
@@ -774,7 +777,7 @@
         </div>
         <div class="zoom-label" id="zoomLbl"></div>
         <div class="pick-bar hidden" id="pickBar"></div>
-        <div class="canvas-hint">拖动空白处平移 · 滚轮缩放 · 拖动卡片/交换机标题调整位置 · 双击查看曲线 · 点网口再点卡片＝接线 · <kbd>/</kbd> 检索 <kbd>Esc</kbd> 清除 <kbd>F</kbd> 适配</div>
+        <div class="canvas-hint">拖动空白处平移 · 滚轮缩放 · 拖动卡片/设备标题调整位置 · 双击查看曲线 · 点网口再点卡片＝接线 · <kbd>/</kbd> 检索 <kbd>Esc</kbd> 清除 <kbd>F</kbd> 适配</div>
       </div>
       <aside class="side">
         <div class="sec"><h3><span class="no">01</span>概况<span class="r" id="ovSite"></span></h3><div class="stat-grid" id="ov"></div></div>
@@ -953,7 +956,8 @@
     $('#symbols').innerHTML = `
       <svg width="44" height="16"><rect x="1" y="1" width="42" height="14" fill="#1a1a1a"/></svg><span>核心 / 汇聚交换机</span>
       <svg width="44" height="16"><rect x="1" y="1" width="42" height="14" fill="#fbfaf6" stroke="#1a1a1a" stroke-dasharray="5 3"/></svg><span>接入交换机</span>
-      <svg width="44" height="16"><line x1="2" y1="8" x2="42" y2="8" stroke="#1a1a1a" stroke-width="5" stroke-dasharray="8 3"/></svg><span>交换机间链路（点击可编辑）</span>
+      <svg width="44" height="16"><line x1="2" y1="8" x2="42" y2="8" stroke="#1a1a1a" stroke-width="5" stroke-dasharray="8 3"/></svg><span>设备间链路（点击可编辑）</span>
+      ${TopoTypes.list.map(t => `<span class="ty">${TopoTypes.icon(t, 16)}</span><span>${esc(TopoTypes.info[t].name)}</span>`).join('')}
       <svg width="44" height="16"><rect x="1" y="1" width="42" height="14" fill="#ff5a1f"/></svg><span>默认网关</span>
       <svg width="44" height="16"><rect x="6" y="2" width="32" height="12" fill="#ff5a1f"/><text x="22" y="11" font-size="9" fill="#fff" text-anchor="middle">告警</text></svg><span>已开启企业微信告警（设备默认不告警）</span>
       <svg width="44" height="16"><rect x="1" y="1" width="42" height="14" fill="none" stroke="#4a4740" stroke-dasharray="4 3"/></svg><span>多 MAC 端口：口后还有交换机/集线器</span>
@@ -1187,7 +1191,7 @@
     const sel = S.sel;
     const head = t => `<h3><span class="no">03</span>${t}</h3>`;
     if (!sel) {
-      box.innerHTML = head('详情') + `<div class="help">点击终端卡片、交换机标题或交换机间连线查看并编辑。<br>
+      box.innerHTML = head('详情') + `<div class="help">点击终端卡片、网络设备标题或设备间连线查看并编辑。<br>
         图中<b style="color:var(--accent)">橙色</b>为默认网关与上联口；<b>斜纹</b>表示存疑；虚线框为多 MAC 端口或未定位区域。<br>
         节点数据保存在 topology.yaml，可在「设置」中直接编辑 YAML 或从文件重新加载。</div>`;
       return;
@@ -1224,7 +1228,7 @@
     const n = isNew ? { attach: { switch: sel.sw || '', port: '' }, flags: [], tags: [] } : S.topo.nodes.find(x => x.id === sel.id);
     if (!n) { box.innerHTML = head('详情'); return; }
     const swOpts = ['<option value="">（未定位）</option>'].concat(S.topo.switches.map(s =>
-      `<option value="${esc(s.id)}" ${n.attach.switch === s.id ? 'selected' : ''}>${esc(s.name || s.id)}</option>`)).join('');
+      `<option value="${esc(s.id)}" ${n.attach.switch === s.id ? 'selected' : ''}>${esc(swLabel(s))}</option>`)).join('');
     const flags = (n.flags || []);
     const flagChecks = Object.keys(TopoFlags).concat(['arp_only']).map(f =>
       `<label><input type="checkbox" name="flag" value="${f}" ${flags.includes(f) ? 'checked' : ''}> ${TopoFlags[f] || '仅 ARP'}</label>`).join('');
@@ -1242,7 +1246,7 @@
         </div>
         <datalist id="vendorList">${S.vendorList.map(v => `<option value="${esc(v)}">`).join('')}</datalist>
         <div class="row2">
-          <label class="f"><span>接入交换机</span><select name="sw">${swOpts}</select></label>
+          <label class="f"><span>接入设备</span><select name="sw">${swOpts}</select></label>
           <label class="f"><span>端口</span><select name="portSel"></select>
             <input type="text" name="port" class="hidden" value="${esc(n.attach.port || '')}" placeholder="输入端口名，如 Gi0/12" style="margin-top:4px"></label>
         </div>
@@ -1270,7 +1274,7 @@
       const sw = S.topo.switches.find(x => x.id === swID);
       const cur = keep ? portIn.value.trim() : '';
       if (!sw) {
-        portSel.innerHTML = '<option value="">（先选择接入交换机）</option>';
+        portSel.innerHTML = '<option value="">（先选择接入设备）</option>';
         portSel.disabled = true;
         portIn.value = '';
         portIn.classList.add('hidden');
@@ -1371,17 +1375,21 @@
 
   function switchForm(box, head, sel) {
     const isNew = sel.kind === 'newSwitch';
-    const s = isNew ? { role: 'access', node_side: 'right', node_columns: 2, ports: [] } : S.topo.switches.find(x => x.id === sel.id);
+    const s = isNew ? { type: sel.type || '', role: 'access', node_side: 'right', node_columns: 2, ports: [] } : S.topo.switches.find(x => x.id === sel.id);
     if (!s) { box.innerHTML = head('详情'); return; }
     const opt = (list, cur, labels) => list.map(v => `<option value="${v}" ${cur === v ? 'selected' : ''}>${labels ? labels[v] : v}</option>`).join('');
     const attached = isNew ? 0 : S.topo.nodes.filter(n => n.attach.switch === s.id).length;
-    box.innerHTML = head(isNew ? '新增交换机' : '交换机 · ' + esc(s.name || s.id)) +
+    const typeName = TopoTypes.name(s);
+    const typeNames = {};
+    TopoTypes.list.forEach(t => { typeNames[t] = TopoTypes.info[t].name; });
+    box.innerHTML = head(isNew ? '新增网络设备' : TopoTypes.icon(TopoTypes.of(s)) + ' ' + esc(typeName) + ' · ' + esc(s.name || s.id)) +
       (!isNew && s.ip ? `<div id="liveBox" data-id="${esc(s.id)}">${liveHTML(s.id)}</div>` : '') +
       `<form id="sf">
         <div class="row2">
+          <label class="f"><span>设备类型</span><select name="type">${opt(TopoTypes.list, TopoTypes.of(s), typeNames)}</select></label>
           <label class="f"><span>名称</span><input type="text" name="name" value="${esc(s.name || '')}" required></label>
           <label class="f"><span>ID</span><input type="text" name="id" value="${esc(s.id || '')}" placeholder="留空自动生成"></label>
-          <label class="f"><span>角色</span><select name="role">${opt(['core', 'aggregation', 'access', 'other'], s.role, { core: '核心', aggregation: '汇聚', access: '接入', other: '其他' })}</select></label>
+          <label class="f" title="决定拓扑图中的配色与故障路径分析：核心/汇聚画成黑色机身；故障路径以核心为终点"><span>网络层次</span><select name="role">${opt(['core', 'aggregation', 'access', 'other'], s.role, { core: '核心', aggregation: '汇聚', access: '接入', other: '其他' })}</select></label>
           <label class="f"><span>层级</span><input type="text" name="layer" value="${esc(s.layer || '')}" placeholder="L2 / L3"></label>
           <label class="f"><span>厂商</span><input type="text" name="vendor" value="${esc(s.vendor || '')}"></label>
           <label class="f"><span>型号</span><input type="text" name="model" value="${esc(s.model || '')}"></label>
@@ -1407,14 +1415,23 @@
           <button class="btn danger" type="button" id="sDel">删除</button>`}
           <button class="btn" type="button" id="sCancel">关闭</button>
         </div>
-        ${isNew ? '' : `<div class="help">下挂节点 ${attached} 个。拖动拓扑图中交换机的标题区域可移动位置。</div>`}
+        ${isNew ? '' : `<div class="help">下挂节点 ${attached} 个。拖动拓扑图中设备的标题区域可移动位置。</div>`}
       </form>`;
     const f = $('#sf');
+    // 新建时切换类型：端口列表为空或仍是上一个类型的默认端口时，换成新类型的常用端口
+    let autoPorts = isNew ? TopoTypes.info[TopoTypes.of(s)].ports : null;
+    if (isNew && autoPorts && !f.elements.ports.value.trim()) f.elements.ports.value = autoPorts;
+    f.elements.type.onchange = () => {
+      if (!isNew) return;
+      const cur = f.elements.ports.value.trim();
+      const next = TopoTypes.info[f.elements.type.value].ports;
+      if (!cur || cur === autoPorts) { f.elements.ports.value = next; autoPorts = next; }
+    };
     f.onsubmit = async ev => {
       ev.preventDefault();
       const e = f.elements;
       const body = {
-        id: e.id.value.trim(), name: e.name.value.trim(), role: e.role.value, layer: e.layer.value.trim(), vendor: e.vendor.value.trim(),
+        id: e.id.value.trim(), name: e.name.value.trim(), type: e.type.value === 'switch' ? '' : e.type.value, role: e.role.value, layer: e.layer.value.trim(), vendor: e.vendor.value.trim(),
         model: e.model.value.trim(), ip: e.ip.value.trim(), mac: e.mac.value.trim(), location: e.location.value.trim(),
         ports: expandPorts(e.ports.value), node_side: e.node_side.value, node_columns: parseInt(e.node_columns.value, 10) || 2,
         port_locations: parsePortLocations(e.port_locations.value),
@@ -1423,7 +1440,7 @@
       if (isNew && view) { const c = view.viewCenter(); body.position = { x: Math.round(c.x - 75), y: Math.round(c.y - 100) }; }
       try {
         const r = await api(isNew ? 'POST' : 'PUT', isNew ? 'api/switches' : 'api/switches/' + encodeURIComponent(s.id), body);
-        toast(isNew ? '已添加交换机' : '已保存');
+        toast(isNew ? '已添加' + TopoTypes.info[e.type.value].name : '已保存');
         S.sel = { kind: 'switch', id: r.id };
         if (view) view.setSelection(S.sel);
         markClean(); await loadTopology();
@@ -1439,7 +1456,7 @@
         catch (err) { toast(errMsg(err), true); }
       };
       $('#sDel').onclick = async () => {
-        if (!confirm(`删除交换机 ${s.name || s.id}？\n其下 ${attached} 个节点会变为“未定位”，相关链路会被删除。`)) return;
+        if (!confirm(`删除${typeName} ${s.name || s.id}？\n其下 ${attached} 个节点会变为“未定位”，相关链路会被删除。`)) return;
         try { await api('DELETE', 'api/switches/' + encodeURIComponent(s.id)); S.sel = null; toast('已删除'); markClean(); await loadTopology(); }
         catch (err) { toast(errMsg(err), true); }
       };
@@ -1450,13 +1467,13 @@
     const isNew = sel.kind === 'newLink';
     const l = isNew ? { from: { switch: '', port: '' }, to: { switch: '', port: '' }, kind: 'uplink', note: '' } : S.topo.links.find(x => x.id === sel.id);
     if (!l) { box.innerHTML = head('详情'); return; }
-    const swOpts = cur => S.topo.switches.map(s => `<option value="${esc(s.id)}" ${cur === s.id ? 'selected' : ''}>${esc(s.name || s.id)}</option>`).join('');
-    box.innerHTML = head(isNew ? '新增交换机间链路' : '链路 · ' + esc(l.from.port + ' ⇄ ' + l.to.port)) + `<form id="lf">
-      <div class="help">“上游”一端填写靠近核心的交换机，告警时用于判断下游交换机故障。</div>
+    const swOpts = cur => S.topo.switches.map(s => `<option value="${esc(s.id)}" ${cur === s.id ? 'selected' : ''}>${esc(swLabel(s))}</option>`).join('');
+    box.innerHTML = head(isNew ? '新增设备间链路' : '链路 · ' + esc(l.from.port + ' ⇄ ' + l.to.port)) + `<form id="lf">
+      <div class="help">“上游”一端填写靠近出口的设备（如 光猫 → 防火墙 → 核心交换机），告警时用于判断下游设备故障。</div>
       <div class="row2">
-        <label class="f"><span>上游交换机</span><select name="fs">${swOpts(l.from.switch)}</select></label>
+        <label class="f"><span>上游设备</span><select name="fs">${swOpts(l.from.switch)}</select></label>
         <label class="f"><span>上游端口</span><input type="text" name="fp" value="${esc(l.from.port)}" required></label>
-        <label class="f"><span>下游交换机</span><select name="ts">${swOpts(l.to.switch)}</select></label>
+        <label class="f"><span>下游设备</span><select name="ts">${swOpts(l.to.switch)}</select></label>
         <label class="f"><span>下游端口</span><input type="text" name="tp" value="${esc(l.to.port)}" required></label>
       </div>
       <div class="row2">
@@ -1528,7 +1545,7 @@
     function rows() {
       if (!S.topo) return [];
       const out = [];
-      S.topo.switches.forEach(s => { if (s.ip) out.push({ id: s.id, ip: s.ip, name: s.name, vendor: s.vendor, loc: '交换机', mac: s.mac, sw: true, alert: !!(s.monitor && s.monitor.alert) }); });
+      S.topo.switches.forEach(s => { if (s.ip) out.push({ id: s.id, ip: s.ip, name: s.name, vendor: s.vendor, loc: TopoTypes.name(s), mac: s.mac, sw: true, alert: !!(s.monitor && s.monitor.alert) }); });
       S.topo.nodes.forEach(n => out.push({ id: n.id, ip: n.ip, name: n.name || n.hostname, vendor: n.vendor, loc: attachLabel(n), mac: n.mac, flags: n.flags, locked: !!n.locked, alert: !!(n.monitor && n.monitor.alert) }));
       return out;
     }
@@ -1694,7 +1711,7 @@
       const o = t.obj;
       $('#dTitle').textContent = o.ip || o.mac || o.id;
       const flags = (o.flags || []).map(f => TopoFlags[f] || f);
-      $('#dSub').innerHTML = [o.name, o.hostname && o.hostname !== o.name ? '主机名 ' + o.hostname : '', o.vendor, t.kind === 'switch' ? '交换机' : attachLabel(o), o.mac, o.location].filter(Boolean).map(esc).join(' · ') +
+      $('#dSub').innerHTML = [o.name, o.hostname && o.hostname !== o.name ? '主机名 ' + o.hostname : '', o.vendor, t.kind === 'switch' ? TopoTypes.name(o) : attachLabel(o), o.mac, o.location].filter(Boolean).map(esc).join(' · ') +
         (flags.length ? ' ' + flags.map(f => `<span class="badge solid">${esc(f)}</span>`).join(' ') : '') +
         ' ' + (o.monitor && o.monitor.alert ? '<span class="badge" style="color:var(--accent)">告警已开启</span>' : '<span class="badge unknown">不告警</span>');
     }
@@ -2709,7 +2726,7 @@
             <td style="width:24px"><input type="checkbox" class="aidD" data-i="${i}" checked></td>
             <td class="mono" style="white-space:nowrap">${esc(d.ip)}<div class="muted">${esc(d.mac || '无 MAC')}</div></td>
             <td style="min-width:180px"><input type="text" class="aidN" data-i="${i}" value="${esc(d.name || '')}" style="margin-bottom:4px">
-              ${d.kind === 'switch' ? '<span class="badge solid">交换机</span>' : `<select class="aidC" data-i="${i}"><option value="">（不分类）</option>${cats.map(c => `<option ${c === d.category ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>`}</td>
+              ${d.kind === 'switch' ? `<span class="badge solid">${esc(TopoTypes.info[d.type || 'switch'] ? TopoTypes.info[d.type || 'switch'].name : '交换机')}</span>` : `<select class="aidC" data-i="${i}"><option value="">（不分类）</option>${cats.map(c => `<option ${c === d.category ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>`}</td>
             <td class="wrap"><span class="badge ${(confTxt[d.confidence] || confTxt.medium)[0]}">${(confTxt[d.confidence] || confTxt.medium)[1]}</span>
               ${esc([d.vendor, d.hostname].filter(Boolean).join(' · '))}<div class="muted">${esc(d.evidence || '')}</div>
               ${d.model ? `<div class="muted mono" style="font-size:11px">${esc(d.model)}</div>` : ''}</td>

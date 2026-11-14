@@ -271,7 +271,7 @@ func deviceLabel(t *topology.Topology, id string) (name, ip, attach string) {
 		if name == "" {
 			name = sw.ID
 		}
-		return name, sw.IP, "交换机（" + sw.Role + "）"
+		return name, sw.IP, sw.TypeName() + "（" + sw.Role + "）"
 	}
 	return id, "", ""
 }

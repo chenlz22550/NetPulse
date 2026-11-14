@@ -23,9 +23,11 @@
 #   gateway                        默认网关 IP
 #   description                    备注
 #
-# switches[]:                      交换机列表（有 ip 时交换机本身也会被 ping 监控）
+# switches[]:                      网络设备列表：交换机及路由器、防火墙、光猫、AP 等（有 ip 时设备本身也会被 ping 监控）
 #   id                             唯一标识，被 links / nodes.attach 引用
 #   name                           显示名
+#   type                           设备类型，留空为交换机：switch | router 路由器 | firewall 防火墙
+#                                    | gateway 上网行为管理 | modem 光猫 | ap 无线AP | ac 无线控制器 | lb 负载均衡 | other
 #   role                           core | aggregation | access | other
 #   layer                          L2 / L3 等，仅展示
 #   vendor / model                 厂商 / 型号
@@ -41,7 +43,7 @@
 #   monitor                        监控参数，同 nodes[].monitor（含 alert，默认不告警）
 #   position {x, y}                拓扑图坐标（交换机左上角）
 #
-# links[]:                         交换机之间的连线
+# links[]:                         网络设备之间的连线（如 光猫 → 防火墙 → 核心交换机）
 #   id                             唯一标识（可空，自动生成）
 #   from {switch, port}            一端：交换机 id + 端口名
 #   to   {switch, port}            另一端
