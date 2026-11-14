@@ -240,3 +240,20 @@ func TestAISettingsSelfCheck(t *testing.T) {
 		t.Fatal("self check should default on")
 	}
 }
+
+func TestAIChartPromptAndFactCheck(t *testing.T) {
+	prompt := aiSystemPrompt("测试机房")
+	for _, want := range []string{"```chart", `"type":"path"`, `"type":"bar"`, `"type":"line"`, `"type":"timeline"`} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("system prompt missing %q", want)
+		}
+	}
+	s, _ := newTestServer(t)
+	tp, _ := s.Topo.Snapshot()
+	ip := tp.Nodes[0].IP
+	draftWithChart := "**结论**：链路异常。\n```chart\n{\"type\":\"path\",\"title\":\"故障路径\",\"nodes\":[{\"id\":\"n1\",\"label\":\"终端\",\"sub\":\"" + ip + " · 离线\",\"state\":\"down\"}]}\n```"
+	sheet := s.aiFactSheet(draftWithChart, nil)
+	if !strings.Contains(sheet, ip) {
+		t.Fatalf("fact sheet did not extract IP from chart block: %s", sheet)
+	}
+}
