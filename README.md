@@ -39,12 +39,23 @@
 | MCP | AI 客户端接入：开关与只读模式、访问令牌、各客户端配置片段、连接测试、工具清单和示例问法 |
 | 教程 | 使用指南：快速上手、看懂拓扑图、告警、扫描发现、端口定位、MCP、登录与安全、常见问题 |
 
-## 企业微信告警
+## 告警通知渠道
 
-在企业微信群中「添加群机器人」，复制 Webhook 地址填到「设置 → 企业微信机器人告警」，勾选启用，点「发送测试消息」确认。
+在「设置 → 告警通知渠道」中填写所需渠道地址，勾选启用并保存。支持同时推送到：
+- 企业微信：原有 `alert.webhook_url` 配置继续有效。
+- 钉钉：`dingtalk_url`，可选加签密钥 `dingtalk_secret`。
+- 飞书：`feishu_url`，可选签名密钥 `feishu_secret`。
+- Slack Incoming Webhook：`slack_url`。
+- 通用 Webhook：`generic_webhook_url`，POST JSON `{"title":"消息标题","text":"告警正文"}`，HTTP 2xx 表示成功。
+
+以上字段均位于 `alert` 下。填写地址即参与推送，清空地址停用该渠道；各渠道共用告警规则、代理和证书设置。钉钉、飞书机器人如启用了关键词校验，请确保消息标题包含关键词。
+「发送测试消息」会使用表单当前值向所有填写的渠道发送，不要求先开启自动告警。单个渠道失败不会阻止其他渠道；告警记录的发送成功表示全部渠道成功，部分失败时会标明失败渠道及错误码。
+MCP 的 `set_alert_config` 支持上述字段（省略保持不变，空字符串清除），`get_settings` 返回脱敏配置，`send_test_alert` 使用已保存配置测试全部渠道。
+
+协议参考：[钉钉签名](https://open.dingtalk.com/document/robots/customize-robot-security-settings)、[飞书机器人](https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot)、[Slack Webhook](https://docs.slack.dev/tools/python-slack-sdk/webhook/)。
 
 **设备默认只监控、不告警。** 需要告警的设备可以：在「监控列表」的「告警」列逐个勾选，或筛选后点「筛选结果开启告警」批量开启；
-也可以在拓扑页的节点/交换机表单里勾选「推送企业微信告警」，或在 `topology.yaml` 中设置 `monitor.alert: true`。
+也可以在拓扑页的节点/交换机表单里勾选「推送告警通知」，或在 `topology.yaml` 中设置 `monitor.alert: true`。
 已开启告警的设备在拓扑图上带橙色「告警」标签。
 
 | 规则 | 默认 |
@@ -270,3 +281,18 @@ node --test web/charts_test.cjs
 测试通过临时目录、本地 HTTP/UDP 模拟服务运行，不使用生产拓扑或向真实企业微信群发送消息；运行环境需要允许监听本地端口。
 
 最近合并功能的验证范围、覆盖率与限制见 [合并回归测试记录](docs/testing/2026-11-14-merge-regression.md)。
+
+### 节点 TCP 端口扫描与持续监控
+
+进入设备详情页的「端口扫描与 TCPing 监控」，输入端口列表（例如 `22,443,3389`）或范围（例如 `1-1024`）进行扫描。单次最多 1024 个端口，并发最多 32；扫描仅探测，不会自动增加监控。可以在结果中点击「加入监控」，也可以直接填写并保存持续监控端口（最多 16 个；留空清除）。
+
+TCPing 在原有 ICMP 之外独立运行：以 TCP 建连耗时为延迟，拒绝连接、超时或其他连接错误均记为失败，不依赖 Ping 是否成功。各端口沿用设备的启停、间隔、超时、阈值、告警开关和全局监控时段，保存独立历史。详情页选择 TCPing 端口可查看曲线。配置保存在 `monitor.tcp_ports`，重启后恢复；它不代表应用层服务健康检查。
+
+MCP 工具：
+
+- `scan_ports`：指定 `id` 或 `ip`，可选 `ports` 整数数组和 `timeout_ms`；省略端口时扫描常用端口。
+- `set_tcp_monitoring`：指定已有设备的 `id` 或 `ip`，用 `ports` 整数数组替换监控列表，`[]` 清除；只读模式下不可用。
+- `get_tcp_monitoring`：查询已配置端口和实时状态。`get_device` 同时包含端口监控信息。
+- `get_history`：增加 `port` 参数查询某个端口的连接延迟和失败率，例如 `{"id":"server-1","port":443,"range":"1h"}`。不传 `port` 仍查询 ICMP。
+
+HTTP 接口：`POST /api/ports/scan`、`GET /api/ports/monitoring?id=...`、`PUT /api/ports/monitoring`、`GET /api/history/<id>?port=443&range=1h`，复用网页登录认证。

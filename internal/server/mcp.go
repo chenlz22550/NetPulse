@@ -35,10 +35,10 @@ var mcpProtocols = []string{"2025-06-18", "2025-03-26", "2024-11-05"}
 const mcpInstructions = `netPing 是机房网络 Ping 监控工具。通过本接口可以：
 1. 查询：get_overview（总体状态与异常设备）、list_devices（设备列表与实时延迟/丢包）、get_device、get_history（历史曲线统计）、list_alerts、get_topology、get_settings。
    分析（只读）：analyze_impact（异常设备按交换机/端口归类，找公共故障点）、get_uplink_path（设备到核心的逐跳路径）、find_outages（历史中断/丢包时段与可用率）、correlate_events（多设备同时异常）、rank_devices（历史稳定性排行）、compare_baseline（与昨天/上周同时段对比）、ping_now（立即 ping 测试）。
-   现场核实（只读，从 netPing 主机实时探测）：get_switch_ports（SNMP 读交换机端口状态、速率、双工、错误计数增长、交换机运行时长）、tcp_check（TCP 端口探测，区分离线与禁 ping）、arp_lookup（ARP 核对，发现 IP 冲突）、trace_route（逐跳路由追踪）、dns_lookup（DNS 解析）。
+   现场核实（只读，从 netPing 主机实时探测）：get_switch_ports（SNMP 读交换机端口状态、速率、双工、错误计数增长、交换机运行时长）、tcp_check（TCP 端口探测，区分离线与禁 ping）、scan_ports（扫描最多 1024 个 TCP 端口）、get_tcp_monitoring（持续 TCPing 状态）、get_history 的 port 参数（端口历史）、arp_lookup（ARP 核对，发现 IP 冲突）、trace_route（逐跳路由追踪）、dns_lookup（DNS 解析）。
 2. 端口定位：get_locate_status、get_switch_mac_table（交换机每个口学到的 MAC）、locate_device（设备实际插在哪个口）、auto_locate（未定位设备自动挂到端口）、apply_location、test_switch_snmp、set_locate_settings。
 网段扫描（自动扫描模式）：get_discovery 查看扫描任务与结果；upsert_scan_job 新建/修改扫描任务（一个或多个网段，按间隔自动扫描、自动添加新设备）、delete_scan_job、scan_network 立即扫描（可传 subnets 临时扫描）、set_discovery_settings、add_discovered_devices、apply_ip_suggestion。
-3. 管理（非只读模式）：upsert_device / delete_device（终端节点）、upsert_switch / delete_switch、upsert_link / delete_link、reset_layout、set_alerting（开关设备告警）、set_alert_config / send_test_alert（企业微信通道）、set_ping_defaults、set_site、set_schedule（全局监控时段）、set_monitoring_paused、replace_topology_yaml（整体替换，先 dry_run 校验）、set_ai_settings（AI 诊断开关、协议格式、深度思考、回答前自检、模型名、超时）。
+3. 管理（非只读模式）：upsert_device / delete_device（终端节点）、upsert_switch / delete_switch、upsert_link / delete_link、reset_layout、set_alerting（开关设备告警）、set_alert_config / send_test_alert（通知渠道）、set_tcp_monitoring（配置设备的持续 TCPing 端口）、set_ping_defaults、set_site、set_schedule（全局监控时段）、set_monitoring_paused、replace_topology_yaml（整体替换，先 dry_run 校验）、set_ai_settings（AI 诊断开关、协议格式、深度思考、回答前自检、模型名、超时）。
 不能通过 MCP 修改：监听地址、网页登录账号、MCP 自身设置、AI 的 API Key / 接口地址 / 代理（需在网页或 config.yaml 中修改）。
 约定：设备用 id 或 ip 指定；修改会立即写回 topology.yaml 并生效；设备默认只监控不告警；时间均为服务器本地时间。
 字段说明见资源 netping://docs/topology-fields.md。批量迁移机房时优先使用 replace_topology_yaml 并先 dry_run=true。删除或整体替换前请先向用户确认。`
@@ -588,8 +588,9 @@ var (
 		"port":   str("端口名，如 Gi0/1、12"),
 	})
 	monitorSchema = obj(map[string]interface{}{
-		"enabled":         boolean("是否 ping 监控（默认 true）"),
-		"alert":           boolean("是否推送企业微信告警（默认 false）"),
+		"tcp_ports":       tcpPortsSchema(16),
+		"enabled":         boolean("是否启用 Ping 和 TCPing 监控（默认 true）"),
+		"alert":           boolean("是否推送告警通知（默认 false）"),
 		"interval_ms":     integer("ping 间隔毫秒（>=200，0 表示用默认值）"),
 		"timeout_ms":      integer("超时毫秒"),
 		"latency_warn_ms": integer("1 分钟平均延迟告警阈值 ms"),
@@ -651,13 +652,14 @@ func init() {
 			Description: "返回设备在指定时间范围内的延迟（平均/最小/最大）与丢包率统计和按时间分桶的数据点。15m/1h 为秒级数据，更长范围为分钟级聚合（最多 30 天）。",
 			Schema: obj(withIDIP(map[string]interface{}{
 				"range":  enum("时间范围，默认 1h", ranges6...),
+				"port":   integer("可选：查询该 TCP 端口的连接耗时和失败率；省略时查询 ICMP"),
 				"points": integer("返回的数据点数量上限，默认 60，最大 360；0 表示只要统计"),
 			})),
 			Run: toolHistory,
 		},
 		{
 			Name: "list_alerts", Title: "告警记录",
-			Description: "返回最近的告警事件（离线、恢复、丢包、延迟高等）及企业微信发送结果，新的在前。",
+			Description: "返回最近的告警事件（离线、恢复、丢包、延迟高等）及通知发送结果，新的在前。",
 			Schema: obj(withIDIP(map[string]interface{}{
 				"limit": integer("返回条数，默认 50，最大 300"),
 			})),
@@ -753,7 +755,7 @@ func init() {
 		},
 		{
 			Name: "set_alerting", Title: "开关设备告警", Write: true,
-			Description: "批量开启或关闭设备的企业微信告警（设备默认不告警）。用 ids 或 ips 指定设备，或用 switch 指定某交换机下的全部节点。",
+			Description: "批量开启或关闭设备的告警通知（设备默认不告警）。用 ids 或 ips 指定设备，或用 switch 指定某交换机下的全部节点。",
 			Schema: obj(map[string]interface{}{
 				"ids":     strArr("设备 id 列表"),
 				"ips":     strArr("设备 IP 列表"),
@@ -823,7 +825,7 @@ func init() {
 				"subnets":      strArr("网段列表（CIDR，每个最大 /20）；空数组表示使用机房网段 site.subnet"),
 				"interval_min": integer("扫描间隔分钟（>=5，默认 30）"),
 				"auto_add":     boolean("新设备是否自动添加（默认 true）；false 时只列在未登记设备中"),
-				"alert":        boolean("自动添加的设备是否同时开启企业微信告警（默认 false）"),
+				"alert":        boolean("自动添加的设备是否同时开启告警通知（默认 false）"),
 				"tags":         strArr("自动添加的设备附加的标签"),
 				"run_now":      boolean("保存后立即扫描一次"),
 			}),
@@ -845,7 +847,7 @@ func init() {
 				"timeout_ms":   integer("扫描单次 ping 超时毫秒（>=100）"),
 				"concurrency":  integer("扫描并发数 1~256"),
 				"exclude":      strArr("不扫描、不自动添加的 IP 或 CIDR（整体替换）"),
-				"notify":       boolean("新增设备、IP 变化时推送企业微信"),
+				"notify":       boolean("新增设备、IP 变化时推送通知"),
 				"oui":          map[string]interface{}{"type": "object", "additionalProperties": map[string]interface{}{"type": "string"}, "description": "MAC 前缀→厂商（整体替换），如 {\"60:D7:E3\": \"深大智能\"}"},
 			}),
 			Run: toolSetDiscoverySettings,
@@ -871,10 +873,17 @@ func init() {
 		},
 		{
 			Name: "set_alert_config", Title: "修改告警设置", Write: true,
-			Description: "修改企业微信机器人告警设置（只修改提供的字段）：开关、webhook、判定次数、持续时间、重复提醒、合并窗口、恢复通知、消息标题、代理。启用告警前需已有 webhook。",
+			Description: "修改多渠道告警设置（只修改提供的字段）：开关、webhook、判定次数、持续时间、重复提醒、合并窗口、恢复通知、消息标题、代理。支持企业微信、钉钉、飞书、Slack、通用 Webhook；启用前至少配置一个地址。",
 			Schema: obj(map[string]interface{}{
-				"enabled":              boolean("是否启用告警推送"),
-				"webhook_url":          str("企业微信群机器人 webhook 地址"),
+				"enabled":             boolean("是否启用告警推送"),
+				"webhook_url":         str("企业微信群机器人 webhook 地址"),
+				"dingtalk_url":        str("钉钉 Webhook 地址，空字符串停用"),
+				"dingtalk_secret":     str("钉钉可选加签密钥，空字符串清除"),
+				"feishu_url":          str("飞书 Webhook 地址，空字符串停用"),
+				"feishu_secret":       str("飞书可选签名密钥，空字符串清除"),
+				"slack_url":           str("Slack Incoming Webhook 地址，空字符串停用"),
+				"generic_webhook_url": str("通用 Webhook 地址，POST JSON {title,text}，空字符串停用"),
+
 				"down_after_failures":  integer("连续失败多少次判离线"),
 				"up_after_successes":   integer("连续成功多少次判恢复"),
 				"loss_duration_min":    integer("丢包持续多少分钟告警"),
@@ -890,7 +899,7 @@ func init() {
 		},
 		{
 			Name: "send_test_alert", Title: "发送测试告警", Write: true,
-			Description: "按当前告警设置向企业微信群发送一条测试消息，用于确认 webhook 可用。",
+			Description: "按当前告警设置向所有已配置渠道发送一条测试消息，用于确认 webhook 可用。",
 			Schema:      obj(map[string]interface{}{}),
 			Run:         toolSendTestAlert,
 		},
@@ -983,13 +992,13 @@ func init() {
 		},
 		{
 			Name: "set_locate_settings", Title: "修改端口定位设置", Write: true,
-			Description: "修改端口定位设置（只修改提供的字段）：enabled 定时定位、interval_min 间隔、community 默认只读团体名、timeout_ms、notify 端口变化推送企业微信、switches 单台交换机设置（按交换机 id 合并：host 读取地址、community 团体名、disabled 不读取）。团体名不会在任何返回中明文显示。交换机上需配置 snmp-server community <名称> ro。",
+			Description: "修改端口定位设置（只修改提供的字段）：enabled 定时定位、interval_min 间隔、community 默认只读团体名、timeout_ms、notify 端口变化推送通知、switches 单台交换机设置（按交换机 id 合并：host 读取地址、community 团体名、disabled 不读取）。团体名不会在任何返回中明文显示。交换机上需配置 snmp-server community <名称> ro。",
 			Schema: obj(map[string]interface{}{
 				"enabled":      boolean("是否定时定位"),
 				"interval_min": integer("定位间隔分钟（>=2）"),
 				"community":    str("默认 SNMP v2c 只读团体名"),
 				"timeout_ms":   integer("SNMP 超时毫秒"),
-				"notify":       boolean("端口变化推送企业微信"),
+				"notify":       boolean("端口变化推送通知"),
 				"switches": map[string]interface{}{"type": "object", "description": "按交换机 id 的单独设置，如 {\"core\": {\"host\": \"192.168.50.250\"}}",
 					"additionalProperties": obj(map[string]interface{}{"host": str("读取地址"), "community": str("团体名"), "disabled": boolean("不读取")})},
 			}),
@@ -1017,6 +1026,7 @@ func init() {
 	}
 	mcpTools = append(mcpTools, analysisTools()...)
 	mcpTools = append(mcpTools, probeTools()...)
+	mcpTools = append(mcpTools, tcpMonitoringTools()...)
 	mcpTools = append(mcpTools, discoverTools()...)
 }
 
@@ -1054,7 +1064,7 @@ func toolOverview(s *Server, _ map[string]json.RawMessage, _ string) (interface{
 		"nodes":             len(t.Nodes),
 		"state_counts":      counts,
 		"monitoring":        map[string]interface{}{"paused": s.Mon.Paused(), "pause_reason": s.Mon.PauseReason(), "schedule": cfg.Schedule.Describe()},
-		"alerting":          map[string]interface{}{"wecom_enabled": cfg.Alert.Enabled, "webhook_configured": cfg.Alert.WebhookURL != "", "devices_with_alert": alertOn},
+		"alerting":          map[string]interface{}{"enabled": cfg.Alert.Enabled, "wecom_enabled": cfg.Alert.Enabled && cfg.Alert.WebhookURL != "", "webhook_configured": cfg.Alert.HasChannels(), "devices_with_alert": alertOn},
 		"gateway":           gw,
 		"abnormal_devices":  abnormal,
 		"server_time":       time.Now().Format("2006-01-02 15:04:05"),
@@ -1150,6 +1160,7 @@ func toolGetDevice(s *Server, a map[string]json.RawMessage, _ string) (interface
 	} else {
 		res["status"] = "未监控（没有 IP 或已停用监控）"
 	}
+	res["tcp_monitoring"], _ = toolGetTCPMonitoring(s, a, "")
 	var alerts []alert.Event
 	for _, ev := range s.Alerts.History(300) {
 		if ev.TargetID == id && len(alerts) < 10 {
@@ -1165,6 +1176,13 @@ func toolHistory(s *Server, a map[string]json.RawMessage, _ string) (interface{}
 	_, id, err := resolveDevice(t, argStr(a, "id"), argStr(a, "ip"))
 	if err != nil {
 		return nil, err
+	}
+	if raw, ok := a["port"]; ok {
+		var port int
+		if err := json.Unmarshal(raw, &port); err != nil || port < 1 || port > 65535 {
+			return nil, badRequest("port 必须为 1–65535 的整数")
+		}
+		id = monitor.TCPID(id, port)
 	}
 	rg := argStr(a, "range")
 	if rg == "" {
@@ -1284,7 +1302,7 @@ func toolSettings(s *Server, _ map[string]json.RawMessage, _ string) (interface{
 	t, _ := s.Topo.Snapshot()
 	site := t.Site
 	al := c.Alert
-	al.WebhookURL = maskWebhook(al.WebhookURL)
+	al = maskAlertChannels(al)
 	return map[string]interface{}{
 		"schedule":             c.Schedule,
 		"schedule_description": c.Schedule.Describe(),
@@ -2060,7 +2078,7 @@ func toolSetAlertConfig(s *Server, a map[string]json.RawMessage, remote string) 
 	}
 	log.Printf("MCP(%s) 修改告警设置", remote)
 	al := c.Alert
-	al.WebhookURL = maskWebhook(al.WebhookURL)
+	al = maskAlertChannels(al)
 	return map[string]interface{}{"ok": true, "alert": al}, nil
 }
 
@@ -2069,7 +2087,7 @@ func toolSendTestAlert(s *Server, _ map[string]json.RawMessage, remote string) (
 		return nil, err
 	}
 	log.Printf("MCP(%s) 发送测试告警", remote)
-	return map[string]interface{}{"ok": true, "note": "测试消息已发送到企业微信群"}, nil
+	return map[string]interface{}{"ok": true, "note": "测试消息已发送到所有已配置渠道"}, nil
 }
 
 func toolSetPingDefaults(s *Server, a map[string]json.RawMessage, remote string) (interface{}, error) {
@@ -2334,4 +2352,15 @@ func toolSetLocateSettings(s *Server, a map[string]json.RawMessage, remote strin
 		out["note"] = locate.ErrNoTargets.Error()
 	}
 	return out, nil
+}
+
+func maskAlertChannels(a config.AlertConfig) config.AlertConfig {
+	a.WebhookURL = maskWebhook(a.WebhookURL)
+	a.DingTalkURL = maskWebhook(a.DingTalkURL)
+	a.FeishuURL = maskWebhook(a.FeishuURL)
+	a.SlackURL = maskWebhook(a.SlackURL)
+	a.GenericWebhookURL = maskWebhook(a.GenericWebhookURL)
+	a.DingTalkSecret = maskWebhook(a.DingTalkSecret)
+	a.FeishuSecret = maskWebhook(a.FeishuSecret)
+	return a
 }

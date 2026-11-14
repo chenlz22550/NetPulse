@@ -145,3 +145,16 @@ func TestSendWeCom(t *testing.T) {
 		t.Fatalf("expected errcode error, got %v", err)
 	}
 }
+
+func TestTCPPortAlertKeepsPortIdentity(t *testing.T) {
+	e, _ := newTestEngine(t)
+	topo := topology.Seed()
+	n := topo.FindNode("n-192-168-50-1")
+	n.Monitor.Alert = true
+	n.Monitor.TCPPorts = []int{443}
+	e.SetTopology(topo)
+	e.Evaluate(time.Now(), []monitor.Status{{ID: monitor.TCPID(n.ID, 443), ParentID: n.ID, Port: 443, Kind: "tcp", IP: n.IP, ConsecFail: 100, LastRTT: -1}})
+	if len(e.pending) != 1 || !strings.Contains(e.pending[0].Name, "TCP:443") || e.pending[0].TargetID == n.ID {
+		t.Fatalf("TCP alert lost identity: %+v", e.pending)
+	}
+}

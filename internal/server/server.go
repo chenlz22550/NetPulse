@@ -226,6 +226,10 @@ func (s *Server) routeAPI(w http.ResponseWriter, r *http.Request) {
 		err = s.handlePositions(w, r)
 	case head == "layout" && arg == "reset" && m == http.MethodPost:
 		err = s.handleLayoutReset(w, r)
+	case head == "ports" && arg == "scan" && m == http.MethodPost:
+		err = s.handlePortScan(w, r)
+	case head == "ports" && arg == "monitoring" && (m == http.MethodPut || m == http.MethodGet):
+		err = s.handleTCPMonitoring(w, r)
 	case head == "status" && m == http.MethodGet:
 		writeJSON(w, s.statusPayload())
 	case head == "stream" && m == http.MethodGet:

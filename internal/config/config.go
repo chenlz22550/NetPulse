@@ -24,8 +24,15 @@ type PingDefaults struct {
 	LossWarnPct   float64 `yaml:"loss_warn_pct" json:"loss_warn_pct"`
 }
 
-// AlertConfig 是企业微信机器人告警配置。
+// AlertConfig 是多渠道告警配置；旧 webhook_url 仍为企业微信。
 type AlertConfig struct {
+	DingTalkURL       string `yaml:"dingtalk_url" json:"dingtalk_url"`
+	DingTalkSecret    string `yaml:"dingtalk_secret" json:"dingtalk_secret"`
+	FeishuURL         string `yaml:"feishu_url" json:"feishu_url"`
+	FeishuSecret      string `yaml:"feishu_secret" json:"feishu_secret"`
+	SlackURL          string `yaml:"slack_url" json:"slack_url"`
+	GenericWebhookURL string `yaml:"generic_webhook_url" json:"generic_webhook_url"`
+
 	Enabled            bool   `yaml:"enabled" json:"enabled"`
 	WebhookURL         string `yaml:"webhook_url" json:"webhook_url"`
 	DownAfterFailures  int    `yaml:"down_after_failures" json:"down_after_failures"`
@@ -247,6 +254,13 @@ func (c *Config) Normalize() {
 		a.SiteTitle = d.Alert.SiteTitle
 	}
 	a.WebhookURL = strings.TrimSpace(a.WebhookURL)
+	a.DingTalkURL = strings.TrimSpace(a.DingTalkURL)
+	a.DingTalkSecret = strings.TrimSpace(a.DingTalkSecret)
+	a.FeishuURL = strings.TrimSpace(a.FeishuURL)
+	a.FeishuSecret = strings.TrimSpace(a.FeishuSecret)
+	a.SlackURL = strings.TrimSpace(a.SlackURL)
+	a.GenericWebhookURL = strings.TrimSpace(a.GenericWebhookURL)
+
 	c.MCP.Token = strings.TrimSpace(c.MCP.Token)
 	dd := &c.Discovery
 	if dd.Jobs == nil { // 旧版配置或首次运行
@@ -327,14 +341,8 @@ func (c *Config) Normalize() {
 
 // Validate 检查用户提交的配置。
 func (c *Config) Validate() error {
-	if c.Alert.WebhookURL != "" {
-		u, err := url.Parse(c.Alert.WebhookURL)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return errors.New("webhook_url 不是有效的 http(s) 地址")
-		}
-	}
-	if c.Alert.Enabled && c.Alert.WebhookURL == "" {
-		return errors.New("启用告警前需要填写企业微信机器人 webhook 地址")
+	if err := c.Alert.ValidateChannels(); err != nil {
+		return err
 	}
 	if err := c.Schedule.Validate(); err != nil {
 		return err
@@ -421,7 +429,11 @@ const header = `# netPing 程序配置（修改 listen / topology_file 后需重
 #   packet_size          ICMP 数据长度（字节）
 #   latency_warn_ms      1 分钟平均延迟超过该值视为“延迟高”
 #   loss_warn_pct        1 分钟丢包率超过该值（%）视为“丢包”
-# alert.*                企业微信群机器人告警：
+# alert.*                多渠道告警（填写地址即参与推送，清空停用）：
+#   dingtalk_url / dingtalk_secret   钉钉 Webhook / 可选加签密钥
+#   feishu_url / feishu_secret       飞书 Webhook / 可选签名密钥
+#   slack_url                       Slack Incoming Webhook
+#   generic_webhook_url             通用 Webhook，POST JSON {title,text}，2xx 为成功
 #   enabled              是否启用
 #   webhook_url          机器人 webhook 地址 https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...
 #   down_after_failures  连续失败多少次判定离线
@@ -553,4 +565,24 @@ func cleanList(in []string) []string {
 		}
 	}
 	return out
+}
+
+// HasChannels indicates whether at least one notification destination is configured.
+func (a AlertConfig) HasChannels() bool {
+	return a.WebhookURL != "" || a.DingTalkURL != "" || a.FeishuURL != "" || a.SlackURL != "" || a.GenericWebhookURL != ""
+}
+func (a AlertConfig) ValidateChannels() error {
+	for name, raw := range map[string]string{"webhook_url": a.WebhookURL, "dingtalk_url": a.DingTalkURL, "feishu_url": a.FeishuURL, "slack_url": a.SlackURL, "generic_webhook_url": a.GenericWebhookURL} {
+		if raw == "" {
+			continue
+		}
+		u, err := url.Parse(raw)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil {
+			return fmt.Errorf("%s 不是有效的 http(s) 地址", name)
+		}
+	}
+	if a.Enabled && !a.HasChannels() {
+		return errors.New("启用告警前需要填写至少一个通知渠道的 webhook 地址")
+	}
+	return nil
 }

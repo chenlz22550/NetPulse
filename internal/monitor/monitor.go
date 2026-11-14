@@ -7,6 +7,8 @@ import (
 	"math/rand"
 	"net"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -30,6 +32,8 @@ const (
 
 // Target 是一个被监控的地址。
 type Target struct {
+	ParentID      string
+	Port          int
 	ID            string
 	Kind          string // node | switch
 	IP            string
@@ -48,6 +52,8 @@ type Sample struct {
 
 // Status 是一个目标的实时指标。
 type Status struct {
+	ParentID      string    `json:"parent_id,omitempty"`
+	Port          int       `json:"port,omitempty"`
 	SSHOpen       bool      `json:"ssh_open"`
 	ID            string    `json:"id"`
 	Kind          string    `json:"kind"`
@@ -102,11 +108,21 @@ func BuildTargets(t *topology.Topology, d config.PingDefaults) []Target {
 	for _, s := range t.Switches {
 		if s.IP != "" && s.Monitor.IsEnabled() {
 			out = append(out, mk(s.ID, "switch", s.IP, s.Monitor))
+			for _, port := range s.Monitor.TCPPorts {
+				tg := mk(TCPID(s.ID, port), "tcp", s.IP, s.Monitor)
+				tg.ParentID, tg.Port = s.ID, port
+				out = append(out, tg)
+			}
 		}
 	}
 	for _, n := range t.Nodes {
 		if n.IP != "" && n.Monitor.IsEnabled() {
 			out = append(out, mk(n.ID, "node", n.IP, n.Monitor))
+			for _, port := range n.Monitor.TCPPorts {
+				tg := mk(TCPID(n.ID, port), "tcp", n.IP, n.Monitor)
+				tg.ParentID, tg.Port = n.ID, port
+				out = append(out, tg)
+			}
 		}
 	}
 	return out
@@ -217,7 +233,11 @@ func (m *Monitor) PauseReason() string {
 }
 
 // Statuses 返回所有目标的实时状态（按 id 排序）。
-func (m *Monitor) Statuses(withSpark bool) []Status {
+func (m *Monitor) Statuses(withSpark bool) []Status { return m.statuses(withSpark, false) }
+
+func (m *Monitor) TCPStatuses(withSpark bool) []Status { return m.statuses(withSpark, true) }
+
+func (m *Monitor) statuses(withSpark, tcp bool) []Status {
 	m.mu.RLock()
 	ws := make([]*worker, 0, len(m.workers))
 	for _, w := range m.workers {
@@ -226,7 +246,10 @@ func (m *Monitor) Statuses(withSpark bool) []Status {
 	m.mu.RUnlock()
 	out := make([]Status, 0, len(ws))
 	for _, w := range ws {
-		out = append(out, w.status(withSpark))
+		st := w.status(withSpark)
+		if (st.Kind == "tcp") == tcp {
+			out = append(out, st)
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
@@ -349,12 +372,16 @@ func (w *worker) setTarget(t Target) {
 func (w *worker) stop() { close(w.quit) }
 
 func (w *worker) run() {
-	p, err := pinger.New()
-	if err != nil {
-		log.Printf("创建 ping 失败 %s: %v", w.target.ID, err)
-		return
+	var p pinger.Pinger
+	if w.getTarget().Port == 0 {
+		var err error
+		p, err = pinger.New()
+		if err != nil {
+			log.Printf("创建 ping 失败 %s: %v", w.target.ID, err)
+			return
+		}
+		defer p.Close()
 	}
-	defer p.Close()
 	defer w.flushMinute(true)
 
 	interval := w.getTarget().Interval
@@ -371,7 +398,13 @@ func (w *worker) run() {
 			w.markPaused()
 		} else {
 			t := w.getTarget()
-			res, err := p.Ping(t.IP, t.Timeout, t.Size)
+			var res pinger.Result
+			var err error
+			if t.Port > 0 {
+				res = tcpPing(t.IP, t.Port, t.Timeout)
+			} else {
+				res, err = p.Ping(t.IP, t.Timeout, t.Size)
+			}
 			if err != nil {
 				log.Printf("ping %s(%s) 出错: %v", t.ID, t.IP, err)
 			}
@@ -548,7 +581,7 @@ func (w *worker) status(withSpark bool) Status {
 // computeLocked 遍历环形缓冲计算各窗口指标，调用方需持有锁。
 func (w *worker) computeLocked(nowMs int64, withSpark bool) Status {
 	st := Status{
-		ID: w.target.ID, Kind: w.target.Kind, IP: w.target.IP,
+		ID: w.target.ID, Kind: w.target.Kind, IP: w.target.IP, ParentID: w.target.ParentID, Port: w.target.Port,
 		ConsecFail: w.consecFail, ConsecOK: w.consecOK,
 		LatencyWarnMs: w.target.LatencyWarnMs, LossWarnPct: w.target.LossWarnPct,
 		LastRTT: -1,
@@ -641,3 +674,24 @@ func (w *worker) recent(sinceMs int64) []Sample {
 }
 
 func round2(v float64) float64 { return math.Round(v*100) / 100 }
+
+// The leading underscore is reserved: topology IDs cannot start with it.
+func TCPID(id string, port int) string { return "_tcp_" + strconv.Itoa(port) + "_" + id }
+func ValidTCPID(id string) bool {
+	parts := strings.SplitN(strings.TrimPrefix(id, "_tcp_"), "_", 2)
+	if !strings.HasPrefix(id, "_tcp_") || len(parts) != 2 {
+		return false
+	}
+	port, err := strconv.Atoi(parts[0])
+	return err == nil && port > 0 && port <= 65535 && topology.ValidID(parts[1]) && id == TCPID(parts[1], port)
+}
+func tcpPing(ip string, port int, timeout time.Duration) pinger.Result {
+	start := time.Now()
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip, strconv.Itoa(port)), timeout)
+	if err != nil {
+		return pinger.Result{}
+	}
+	elapsed := time.Since(start)
+	conn.Close()
+	return pinger.Result{OK: true, RTT: elapsed}
+}
