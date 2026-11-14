@@ -2725,7 +2725,9 @@ snmp-agent community read 团体名</pre></div></div>
       if (closeTerminal) closeTerminal();
       const isSSH = protocol === 'ssh', title = isSSH ? 'SSH' : 'Telnet';
       const sw = S.topo.switches.find(s => s.id === id);
-      const host = ((cfg.locate.switches || {})[id] || {}).host || sw.ip;
+      // 读取地址可带 SNMP 端口；终端使用表单中独立设置的 TCP 端口。
+      const readHost = String(((cfg.locate.switches || {})[id] || {}).host || sw.ip || '').trim();
+      const host = readHost.replace(/^(\[[^\]]+\]|[^:]+):[^:]*$/, '$1');
       if (!host) { toast('请先保存该交换机的读取地址或管理 IP', true); return; }
       const dialog = document.createElement('dialog');
       dialog.className = 'telnet-dialog' + (isSSH ? ' ssh-dialog' : '');
@@ -2830,7 +2832,8 @@ snmp-agent community read 团体名</pre></div></div>
         url.searchParams.set('port', port.value);
         const ws = new WebSocket(url); socket = ws; ws.binaryType = 'arraybuffer';
         setState('连接中…', true);
-        term.writeln(`[正在连接 ${host}:${port.value}…]`);
+        const endpoint = `${host.includes(':') && !host.startsWith('[') ? `[${host}]` : host}:${port.value}`;
+        term.writeln(`[正在连接 ${endpoint}…]`);
         ws.onopen = () => {
           if (isSSH) { send({ type: 'auth', username, password, cols: term.cols, rows: term.rows }); password = ''; }
           else send({ type: 'resize', cols: term.cols, rows: term.rows });
