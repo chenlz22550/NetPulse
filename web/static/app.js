@@ -271,6 +271,7 @@
       case 'locate': page = locatePage(app); break;
       case 'guide': page = guidePage(app); break;
       case 'ai': page = aiPage(app, decodeURIComponent(arg || '')); break;
+      case 'report': page = reportPage(app, decodeURIComponent(arg || '')); break;
       default: page = topoPage(app);
     }
   }
@@ -454,7 +455,9 @@
   // ---------------------------------------------------------------------------
   // AI 诊断页
   // 轻量 Markdown 渲染：先转义再处理标题、列表、粗体、行内代码、代码块（含可视化图表）、表格
-  function mdLite(src) {
+  // opt.doc：文档模式（运维报告），# ~ #### 分别输出 h1 ~ h4，并支持 --- 分隔线
+  function mdLite(src, opt) {
+    const doc = !!(opt && opt.doc);
     const inline = t => esc(t)
       .replace(/`([^`]+)`/g, '<code>$1</code>')
       .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
@@ -488,7 +491,8 @@
         continue;
       }
       let m;
-      if ((m = l.match(/^(#{1,4})\s+(.*)$/))) { closeList(); html += `<h4>${inline(m[2])}</h4>`; }
+      if ((m = l.match(/^(#{1,4})\s+(.*)$/))) { closeList(); const h = doc ? m[1].length : 4; html += `<h${h}>${inline(m[2])}</h${h}>`; }
+      else if (doc && /^\s*(-{3,}|\*{3,})\s*$/.test(l)) { closeList(); html += '<hr>'; }
       else if ((m = l.match(/^\s*[-*•]\s+(.*)$/))) { if (list !== 'ul') { closeList(); html += '<ul>'; list = 'ul'; } html += `<li>${inline(m[1])}</li>`; }
       else if ((m = l.match(/^\s*\d+[.、)]\s+(.*)$/))) { if (list !== 'ol') { closeList(); html += '<ol>'; list = 'ol'; } html += `<li>${inline(m[1])}</li>`; }
       else if (!l.trim()) { closeList(); }
@@ -753,6 +757,207 @@
         if (a.ready) ask(`诊断设备 ${label}：它现在是否正常？最近有没有异常（中断时段、和昨天比有没有变差）？上联路径是否正常？如果有问题，分析可能原因并给出排查步骤。`, focusID);
         else toast('请先在右侧设置 API Key', true);
       }
+    }).catch(e => toast(errMsg(e), true));
+    return { destroy() { if (busy) busy.abort(); } };
+  }
+
+  // ---------------------------------------------------------------------------
+  // 运维报告页：AI 按日报 / 周报 / 月报撰写运维报告，保存在服务器，可下载 Markdown、导出 HTML 或打印为 PDF
+  const REPORT_RANGES = [['24h', '日报', '近 24 小时'], ['7d', '周报', '近 7 天'], ['30d', '月报', '近 30 天']];
+  function reportKPIs(k) {
+    if (!k) return '';
+    const cell = (label, v, cls) => `<div class="rpt-kpi"><div class="k">${label}</div><div class="v ${cls || ''}">${v}</div></div>`;
+    const av = k.availability_pct;
+    return `<div class="rpt-kpis">
+      ${cell('可用率', av.toFixed(2) + '%', av >= 99.9 ? 'v-ok' : av >= 99 ? 'v-warn' : 'v-down')}
+      ${cell('丢包率', k.loss_pct.toFixed(2) + '%', k.loss_pct >= 1 ? 'v-down' : k.loss_pct > 0 ? 'v-warn' : 'v-ok')}
+      ${cell('平均延迟', fmtMs(k.avg_ms))}
+      ${cell('累计中断', k.down_minutes + ' 分钟', k.down_minutes ? 'v-warn' : '')}
+      ${cell('告警事件', k.alerts + ' 条')}
+      ${cell('当前异常', k.abnormal_now + ' 台', k.abnormal_now ? 'v-down' : 'v-ok')}
+      ${cell('监控设备', k.with_data + ' / ' + k.monitored)}
+    </div>`;
+  }
+  // 报告正文 HTML（页面查看与导出共用）
+  function reportDocHTML(rp) {
+    return `<div class="rpt-meta">${esc(rp.kind)} · ${esc(rp.range_label)}（${esc(rp.from)} ~ ${esc(rp.to)}） · 生成于 ${esc(rp.time)} · ${esc(rp.model)}</div>
+      ${reportKPIs(rp.summary)}<div class="ai-md rpt-md">${mdLite(rp.markdown, { doc: true })}</div>`;
+  }
+  let reportCSS = null;
+  // 导出为自包含 HTML：内联样式与已渲染的 SVG 图表，可离线打开、转发或打印为 PDF
+  async function reportStandalone(rp) {
+    if (reportCSS == null) {
+      try { reportCSS = await (await fetch('style.css')).text(); } catch (e) { reportCSS = ''; }
+    }
+    return `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${esc(rp.title)}</title>
+<style>${reportCSS}
+html, body { height: auto; background: #fff; }
+body { padding: 32px 16px; }
+.rpt-doc { max-width: 900px; margin: 0 auto; background: #fff; }
+.rpt-foot { max-width: 900px; margin: 24px auto 0; color: #8a857a; font-size: 11px; border-top: 1px solid #e0dacd; padding-top: 8px; }
+@media print { body { padding: 0; } .ai-chart, table, .rpt-kpis { break-inside: avoid; } h1, h2, h3 { break-after: avoid; } }
+</style></head>
+<body><article class="rpt-doc">${reportDocHTML(rp)}</article>
+<div class="rpt-foot">本报告由 netPing AI 生成，正文结论由大模型基于监控数据撰写，附录数据由程序直接统计。</div>
+</body></html>`;
+  }
+  function download(name, text, type) {
+    const url = URL.createObjectURL(new Blob([text], { type }));
+    const a = document.createElement('a');
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  }
+
+  function reportPage(app, openID) {
+    let list = [], cur = null, busy = null, live = null, settings = null;
+    let rg = sessionStorage.getItem('np_report_range') || '24h';
+    app.innerHTML = `<div class="page pad"><div class="ai rpt">
+      <div class="panel rpt-main"><div class="ph"><span id="rTitle">运维报告</span>
+        <span class="r btns" style="margin:0" id="rActs"></span></div>
+        <div class="rpt-view" id="rView"></div>
+      </div>
+      <div class="ai-side">
+        <div class="panel"><div class="ph">生成报告<span class="r" id="rState"></span></div><div class="pb">
+          <div class="help" style="margin-top:0">统计周期</div>
+          <div class="chips" id="rRange" style="margin:0 0 10px">${REPORT_RANGES.map(([v, k, l]) => `<button class="chip" data-r="${v}">${k} · ${l}</button>`).join('')}</div>
+          <label class="f"><span>额外要求（可选）</span><textarea id="rNote" rows="3" maxlength="500" placeholder="如：重点关注 3 楼摄像头；写给领导看，简洁一些；列出需要采购更换的设备"></textarea></label>
+          <div class="btns"><button class="btn accent" id="rGen">✦ 生成运维报告</button></div>
+          <div class="help">AI 先读取程序统计的全网可用率、丢包、延迟、中断、告警和当前异常，必要时再查询设备历史，按「总体结论 → 关键指标 → 稳定性分析 → 告警与故障 → 风险隐患 → 处理建议」撰写报告，并附趋势和排行图表。报告末尾附程序直接统计的原始数据，便于核对。</div>
+        </div></div>
+        <div class="panel"><div class="ph">历史报告<span class="r muted" id="rCount"></span></div><div class="rpt-list" id="rList"></div></div>
+      </div>
+    </div></div>`;
+
+    const drawRange = () => $$('#rRange .chip').forEach(b => b.classList.toggle('on', b.dataset.r === rg));
+    $$('#rRange .chip').forEach(b => b.onclick = () => { rg = b.dataset.r; sessionStorage.setItem('np_report_range', rg); drawRange(); });
+    drawRange();
+
+    function drawList() {
+      $('#rCount').textContent = list.length ? list.length + ' 份' : '';
+      $('#rList').innerHTML = list.length ? list.map(r => {
+        const k = r.summary || {};
+        return `<div class="rpt-item${cur && cur.id === r.id ? ' on' : ''}" data-id="${esc(r.id)}">
+          <div class="t"><span class="badge unknown">${esc(r.kind)}</span> ${esc(r.title)}</div>
+          <div class="muted">${esc(r.time)} · 可用率 ${k.availability_pct != null ? k.availability_pct.toFixed(2) + '%' : '-'} · 告警 ${k.alerts != null ? k.alerts : '-'}</div></div>`;
+      }).join('') : '<div class="help" style="padding:12px;margin:0">还没有报告。选择周期后点「生成运维报告」。</div>';
+      $$('#rList .rpt-item').forEach(el => el.onclick = () => { if (!busy) show(el.dataset.id); });
+    }
+    function drawActs() {
+      const acts = $('#rActs');
+      if (busy) { acts.innerHTML = '<button class="btn small danger" id="rStop">停止生成</button>'; $('#rStop').onclick = () => busy.abort(); return; }
+      if (!cur) { acts.innerHTML = ''; return; }
+      acts.innerHTML = `<button class="btn small" id="rMd" title="下载 Markdown 原文（图表为 chart 代码块）">下载 Markdown</button>
+        <button class="btn small" id="rHtml" title="自包含 HTML，图表已渲染，可离线打开或发给他人">导出 HTML</button>
+        <button class="btn small" id="rPdf" title="打开打印对话框，目标选择「另存为 PDF」">打印 / PDF</button>
+        <button class="btn small" id="rCopy">复制原文</button>
+        <button class="btn small danger" id="rDel">删除</button>`;
+      const base = 'netPing-运维报告-' + cur.id;
+      $('#rMd').onclick = () => { location.href = 'api/ai/reports/' + encodeURIComponent(cur.id) + '.md'; };
+      $('#rHtml').onclick = async () => download(base + '.html', await reportStandalone(cur), 'text/html;charset=utf-8');
+      $('#rPdf').onclick = async () => {
+        const html = await reportStandalone(cur);
+        const fr = document.createElement('iframe');
+        fr.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0';
+        document.body.appendChild(fr);
+        fr.onload = () => {
+          const w = fr.contentWindow;
+          w.document.title = base;
+          setTimeout(() => { w.focus(); w.print(); setTimeout(() => fr.remove(), 1000); }, 200);
+        };
+        fr.srcdoc = html;
+      };
+      $('#rCopy').onclick = () => copyText(cur.markdown);
+      $('#rDel').onclick = async () => {
+        if (!confirm(`删除报告「${cur.title}」？`)) return;
+        try {
+          await api('DELETE', 'api/ai/reports/' + encodeURIComponent(cur.id));
+          list = list.filter(r => r.id !== cur.id); cur = null; sessionStorage.removeItem('np_report_cur');
+          drawList(); drawView(); toast('已删除');
+        } catch (e) { toast(errMsg(e), true); }
+      };
+    }
+    function drawView() {
+      const v = $('#rView');
+      if (live) {
+        const tools = live.tools.map(t => `<span class="ai-tool">查询 · ${esc(t.title || t.name)}</span>`).join('');
+        $('#rTitle').textContent = '正在生成' + (REPORT_RANGES.find(x => x[0] === live.range) || [, ''])[1] + '…';
+        const stick = v.scrollHeight - v.scrollTop - v.clientHeight < 60;
+        v.innerHTML = `<div class="rpt-doc">${live.stats ? reportKPIs(live.stats) : ''}
+          ${tools ? `<div class="ai-tools">${tools}</div>` : ''}
+          <div class="ai-md rpt-md">${mdLite(live.content, { doc: true })}</div>
+          ${live.status ? `<div class="ai-status"><span class="ai-spin"></span>${esc(live.status)}</div>` : ''}
+          ${live.error ? `<div class="ai-err">${esc(live.error)}</div>` : ''}</div>`;
+        if (stick) v.scrollTop = v.scrollHeight;
+      } else if (cur) {
+        $('#rTitle').textContent = cur.title;
+        v.innerHTML = `<article class="rpt-doc">${reportDocHTML(cur)}</article>`;
+        v.scrollTop = 0;
+      } else {
+        $('#rTitle').textContent = '运维报告';
+        v.innerHTML = `<div class="ai-empty"><b>AI 运维报告</b><br>选择日报、周报或月报，AI 会结合监控统计、告警和历史曲线撰写一份完整的运维报告。<br>生成后可下载 Markdown、导出 HTML，或打印为 PDF。</div>`;
+      }
+      drawActs();
+    }
+    async function show(id) {
+      live = null;
+      try {
+        cur = await api('GET', 'api/ai/reports/' + encodeURIComponent(id));
+        sessionStorage.setItem('np_report_cur', id);
+      } catch (e) { cur = null; sessionStorage.removeItem('np_report_cur'); toast(errMsg(e), true); }
+      drawList(); drawView();
+    }
+    async function generate() {
+      if (busy) return;
+      if (!settings || !settings.ready) { toast('请先在「AI 诊断」页设置 API Key 并启用', true); return; }
+      const ctl = new AbortController();
+      busy = ctl;
+      live = { range: rg, content: '', tools: [], status: '正在连接…', stats: null, error: '' };
+      $('#rGen').disabled = true;
+      drawView();
+      let got = null;
+      try {
+        await streamNDJSON('api/ai/report', { range: rg, note: $('#rNote').value.trim() }, ctl.signal, ev => {
+          if (ev.t === 'status') live.status = ev.text;
+          else if (ev.t === 'stats') live.stats = ev.stats;
+          else if (ev.t === 'delta') { live.content += ev.text; live.status = ''; }
+          else if (ev.t === 'tool') { live.tools.push(ev); live.status = '正在查询 ' + (ev.title || ev.name) + '…'; }
+          else if (ev.t === 'break') { live.content = ''; } // 工具调用前的过渡文字不属于报告
+          else if (ev.t === 'warn') toast(ev.text, true);
+          else if (ev.t === 'error') { live.error = ev.error; live.status = ''; }
+          else if (ev.t === 'report') got = ev.report;
+          drawView();
+        });
+        if (!got && !live.error) live.error = '没有收到完整的报告，请重试。';
+      } catch (e) {
+        live.error = e.name === 'AbortError' ? '已停止生成' : errMsg(e);
+      } finally {
+        busy = null;
+        $('#rGen').disabled = false;
+      }
+      if (got) {
+        live = null; cur = got;
+        sessionStorage.setItem('np_report_cur', got.id);
+        list = [got].concat(list.filter(r => r.id !== got.id));
+        drawList(); drawView();
+        toast('报告已生成并保存');
+      } else { live.status = ''; drawView(); }
+    }
+    $('#rGen').onclick = generate;
+
+    drawView(); drawList();
+    api('GET', 'api/ai/settings').then(a => {
+      settings = a;
+      $('#rState').innerHTML = a.ready ? `<span class="muted">${esc(a.model)}</span>` : '<a href="#/ai" class="badge slow">先设置 AI</a>';
+    }).catch(() => {});
+    api('GET', 'api/ai/reports').then(l => {
+      list = l || [];
+      drawList();
+      const want = openID || sessionStorage.getItem('np_report_cur');
+      if (want && list.some(r => r.id === want)) show(want);
+      if (openID) history.replaceState(null, '', '#/report');
     }).catch(e => toast(errMsg(e), true));
     return { destroy() { if (busy) busy.abort(); } };
   }
