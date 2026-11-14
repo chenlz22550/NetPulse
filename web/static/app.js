@@ -26,7 +26,7 @@
   // 通用
   async function api(method, url, body, opts) {
     opts = opts || {};
-    const init = { method, headers: {} };
+    const init = { method, headers: {}, signal: opts.signal };
     if (body !== undefined) {
       if (opts.text) { init.body = body; init.headers['Content-Type'] = 'text/plain; charset=utf-8'; }
       else { init.body = JSON.stringify(body); init.headers['Content-Type'] = 'application/json'; }
@@ -206,6 +206,7 @@
       const d = JSON.parse(ev.data);
       S.connected = true;
       S.status = d.statuses || {};
+      S.tcpStatus = d.tcp_statuses || [];
       S.summary = d.summary;
       S.paused = d.paused;
       S.manualPaused = d.manual_paused;
@@ -288,7 +289,7 @@
             程序常驻在任务栏托盘 / 菜单栏，图标颜色：<span class="g-dot ok"></span>正常 <span class="g-dot warn"></span>丢包或延迟高 <span class="g-dot down"></span>有设备离线 <span class="g-dot idle"></span>暂停。</li>
           <li><b>设置登录密码。</b>第一次打开管理页面时，在<b>运行 netPing 的电脑上</b>设置密码（至少 6 位）。之后每次打开都要输入密码，登录后这个浏览器 30 天内免登录。</li>
           <li><b>核对机房和设备。</b>在「设置 → 机房信息」填写网段和默认网关；到「拓扑」页检查交换机、端口和设备是否和实际一致。设备多时可以用「扫描发现」自动添加。</li>
-          <li><b>配置告警。</b>在「设置」里填写企业微信群机器人的 Webhook 并发送测试消息；再到「监控列表」给需要告警的设备打勾。<b>设备默认只监控、不告警。</b></li>
+          <li><b>配置告警。</b>在「设置」里填写所需通知渠道的 Webhook 并发送测试消息；再到「监控列表」给需要告警的设备打勾。<b>设备默认只监控、不告警。</b></li>
           <li><b>按需开启更多功能：</b>「端口定位」自动查出设备插在哪个交换机口；「MCP」让 AI 助手用自然语言查询和维护。</li>
         </ol>
         <div class="g-note">其他电脑访问：浏览器打开 <code>http://服务器IP:8090/</code>。打不开时检查防火墙是否放行 8090 端口，以及 config.yaml 中 <code>listen</code> 是否为 <code>0.0.0.0:8090</code>。</div>`],
@@ -304,7 +305,7 @@
         <h4>设备卡片</h4>
         <ul>
           <li>卡片显示 IP、厂商（或名称）、MAC 和实时延迟。<b>红框</b>为离线，<b>橙框</b>为丢包或延迟高，左侧色条代表厂商（右侧「厂商图例」可点击筛选）。</li>
-          <li>卡片上方的标签：默认网关、关键、存疑（斜纹）、DHCP、自动发现、跳板机、<span class="g-tag">告警</span>（已开启企业微信告警）。</li>
+          <li>卡片上方的标签：默认网关、关键、存疑（斜纹）、DHCP、自动发现、跳板机、<span class="g-tag">告警</span>（已开启告警通知）。</li>
           <li><b>虚线框</b>表示一个端口后面有多台设备（口后还有傻瓜交换机、AP 等）；左下的虚线区域是“未定位”的设备，还不知道接在哪个口。</li>
         </ul>
         <h4>连线</h4>
@@ -327,17 +328,17 @@
       ['list', '监控列表与延迟曲线', `
         <ul>
           <li>「监控列表」列出所有地址的当前延迟、1 分钟平均、抖动、1 分钟 / 5 分钟 / 1 小时丢包率和最近 60 次的迷你曲线，点表头排序，可按状态和关键字筛选。</li>
-          <li>「告警」列勾选即开启这台设备的企业微信告警；先筛选再点「筛选结果开启告警」可批量开启。</li>
+          <li>「告警」列勾选即开启这台设备的告警通知；先筛选再点「筛选结果开启告警」可批量开启。</li>
           <li>点设备进入详情：延迟曲线（平均值、最小~最大区间、阈值线）和丢包柱状图，范围从 15 分钟到 30 天。</li>
           <li>历史数据按分钟汇总保存，默认保留 30 天（「设置 → 默认 Ping 参数」可改）。</li>
         </ul>
         ${go('list', '打开监控列表')}`],
 
-      ['alert', '企业微信告警', `
+      ['alert', '告警通知', `
         <ol class="g-steps">
-          <li>在企业微信群里「添加群机器人」，复制 Webhook 地址。</li>
-          <li>填到「设置 → 企业微信机器人告警」，勾选「启用告警推送」，保存后点「发送测试消息」，确认群里收到。</li>
-          <li>给需要告警的设备开启告警：「监控列表」勾选，或在拓扑页设备表单中勾选「推送企业微信告警」。</li>
+          <li>选择企业微信、钉钉、飞书、Slack 或通用 Webhook，获取对应地址；钉钉、飞书可填写签名密钥。</li>
+          <li>填到「设置 → 告警通知渠道」，勾选「启用告警推送」，保存后点「发送测试消息」，确认各渠道收到。</li>
+          <li>给需要告警的设备开启告警：「监控列表」勾选，或在拓扑页设备表单中勾选「推送告警通知」。</li>
         </ol>
         <table class="g-table">
           <tr><th>规则</th><th>默认</th></tr>
@@ -961,7 +962,7 @@
       <svg width="44" height="16"><line x1="2" y1="8" x2="42" y2="8" stroke="#1a1a1a" stroke-width="5" stroke-dasharray="8 3"/></svg><span>设备间链路（点击可编辑）</span>
       ${TopoTypes.list.map(t => `<span class="ty">${TopoTypes.icon(t, 16)}</span><span>${esc(TopoTypes.info[t].name)}</span>`).join('')}
       <svg width="44" height="16"><rect x="1" y="1" width="42" height="14" fill="#ff5a1f"/></svg><span>默认网关</span>
-      <svg width="44" height="16"><rect x="6" y="2" width="32" height="12" fill="#ff5a1f"/><text x="22" y="11" font-size="9" fill="#fff" text-anchor="middle">告警</text></svg><span>已开启企业微信告警（设备默认不告警）</span>
+      <svg width="44" height="16"><rect x="6" y="2" width="32" height="12" fill="#ff5a1f"/><text x="22" y="11" font-size="9" fill="#fff" text-anchor="middle">告警</text></svg><span>已开启告警通知（设备默认不告警）</span>
       <svg width="44" height="16"><rect x="1" y="1" width="42" height="14" fill="none" stroke="#4a4740" stroke-dasharray="4 3"/></svg><span>多 MAC 端口：口后还有交换机/集线器</span>
       <svg width="44" height="16"><defs><pattern id="h2" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="5" stroke="#8a857a"/></pattern></defs><rect x="1" y="1" width="42" height="14" fill="url(#h2)" stroke="#4a4740"/></svg><span>存疑：复扫未见 / 信息待核实</span>
       <svg width="44" height="16"><rect x="1" y="1" width="42" height="14" fill="#fff" stroke="#d63a22" stroke-width="2"/></svg><span>离线（红框）/ 丢包或延迟高（橙框）</span>`;
@@ -1206,8 +1207,8 @@
   function monFields(m, defaults) {
     m = m || {};
     const d = defaults || {};
-    return `<div class="checks" style="margin-bottom:6px"><label><input type="checkbox" name="mon_enabled" ${m.enabled === false ? '' : 'checked'}> 启用 ping 监控</label>
-        <label><input type="checkbox" name="mon_alert" ${m.alert ? 'checked' : ''}> 推送企业微信告警</label></div>
+    return `<input type="hidden" name="tcp_ports" value="${esc(JSON.stringify(m.tcp_ports || []))}"><div class="checks" style="margin-bottom:6px"><label><input type="checkbox" name="mon_enabled" ${m.enabled === false ? '' : 'checked'}> 启用监控（Ping / TCPing）</label>
+        <label><input type="checkbox" name="mon_alert" ${m.alert ? 'checked' : ''}> 推送告警通知</label></div>
       <div class="row2">
         <label class="f"><span>间隔 ms</span><input type="number" name="interval_ms" value="${m.interval_ms || ''}" placeholder="默认 ${d.interval_ms || 1000}"></label>
         <label class="f"><span>超时 ms</span><input type="number" name="timeout_ms" value="${m.timeout_ms || ''}" placeholder="默认 ${d.timeout_ms || 1000}"></label>
@@ -1220,6 +1221,7 @@
     const m = { interval_ms: num('interval_ms'), timeout_ms: num('timeout_ms'), latency_warn_ms: num('latency_warn_ms'), loss_warn_pct: num('loss_warn_pct') };
     if (!f.elements.mon_enabled.checked) m.enabled = false;
     if (f.elements.mon_alert.checked) m.alert = true;
+    m.tcp_ports = JSON.parse(f.elements.tcp_ports.value);
     return m;
   }
   let pingDefaults = null;
@@ -1522,7 +1524,7 @@
         <th data-k="state">状态</th><th data-k="ip">IP</th><th data-k="vendor">名称 / 厂商</th><th data-k="loc">接线位置</th>
         <th data-k="last" class="num">当前</th><th data-k="avg1" class="num">1m 平均</th><th data-k="jit" class="num">抖动</th>
         <th data-k="l1" class="num">1m 丢包</th><th data-k="l5" class="num">5m 丢包</th><th data-k="l60" class="num">1h 丢包</th>
-        <th>最近 60 次</th><th data-k="since" class="num">状态持续</th><th data-k="alert" title="是否推送企业微信告警">告警</th><th title="上锁后不参与一键清理">上锁保护</th>
+        <th>最近 60 次</th><th data-k="since" class="num">状态持续</th><th data-k="alert" title="是否推送告警通知">告警</th><th title="上锁后不参与一键清理">上锁保护</th>
       </tr></thead><tbody id="lbody"></tbody></table>
       <dialog id="lCleanupDialog" class="cleanup-dialog">
         <div class="ph">清理无效设备</div>
@@ -1628,7 +1630,7 @@
     const bulk = enabled => {
       const ids = lastList.filter(r => r.ip && r.alert !== enabled).map(r => r.id);
       if (!ids.length) { toast('筛选结果中没有需要修改的设备'); return; }
-      if (!confirm(`对筛选出的 ${ids.length} 台设备${enabled ? '开启' : '关闭'}企业微信告警？`)) return;
+      if (!confirm(`对筛选出的 ${ids.length} 台设备${enabled ? '开启' : '关闭'}告警通知？`)) return;
       setAlert(ids, enabled);
     };
     $('#bulkOn').onclick = () => bulk(true);
@@ -1688,9 +1690,22 @@
 
   // ---------------------------------------------------------------------------
   // 节点详情（历史曲线）
+  function parseTCPPorts(text, max) {
+    const ports = new Set();
+    for (const token of text.trim().split(/[,，\s]+/).filter(Boolean)) {
+      const m = token.match(/^(\d+)(?:-(\d+))?$/);
+      if (!m) throw new Error('端口格式应为 22,443 或 1-1024');
+      const first = Number(m[1]), last = Number(m[2] || m[1]);
+      if (first < 1 || last > 65535 || first > last) throw new Error('端口范围必须在 1–65535 之间');
+      if (last - first + 1 > max) throw new Error(`最多 ${max} 个端口`);
+      for (let p = first; p <= last; p++) { ports.add(p); if (ports.size > max) throw new Error(`最多 ${max} 个端口`); }
+    }
+    return [...ports];
+  }
+
   function nodePage(app, id) {
     let range = sessionStorage.getItem('np_range') || '1h';
-    let timer = 0, alive = true;
+    let timer = 0, alive = true, selectedPort = 0, scanController = null, savingPorts = false, loadVersion = 0;
     app.innerHTML = `<div class="page pad">
       <div class="detail-head">
         <a href="javascript:history.back()" class="btn small">← 返回</a>
@@ -1698,10 +1713,86 @@
         <div style="margin-left:auto" class="btns" id="ranges"></div>
         <a class="btn small" href="#/ai/${encodeURIComponent(id)}" title="让 AI 结合实时数据和历史曲线诊断这台设备">AI 诊断</a>
       </div>
+      <div class="panel"><div class="ph">端口扫描与 TCPing 监控</div><div class="pb">
+        <p class="help">从 netPing 服务器探测。持续监控独立于 Ping 结果，沿用设备的间隔、超时、告警和监控时段；拒绝连接或超时均记为失败。</p>
+        <div class="row2 tcp-config">
+          <form id="portScanForm"><label class="f"><span>扫描端口（最多 1024 个，支持 1-1024）</span><input name="ports" value="22,23,80,443,445,554,3389,8000,8080,9100" required></label>
+            <div class="btns"><button class="btn" type="submit">扫描端口</button><button class="btn" type="button" id="cancelPortScan" disabled>取消</button></div></form>
+          <form id="tcpMonitorForm"><label class="f"><span>持续监控端口（最多 16 个，逗号分隔；留空清除）</span><input name="ports" placeholder="22,443,3389"></label>
+            <button class="btn primary" type="submit">保存 TCPing 监控</button></form>
+        </div>
+        <div id="portScanState" role="status" class="help"></div><div id="portScanResults" class="table-wrap"></div>
+        <div id="tcpMonitorRows" class="table-wrap"></div>
+      </div></div>
+      <div class="btns"><label>查看曲线 <select id="monitorSeries"><option value="0">ICMP Ping</option></select></label></div>
       <div class="tiles" id="dTiles"></div>
-      <div class="panel"><div class="ph">延迟<span class="muted" style="font-weight:normal">橙线为平均值，浅色区间为最小~最大</span><span class="r muted" id="dBucket"></span></div><div class="pb"><div id="cLat"></div></div></div>
-      <div class="panel"><div class="ph">丢包率<span class="muted" style="font-weight:normal">红色为全部丢失，橙色为部分丢失</span></div><div class="pb"><div id="cLoss"></div></div></div>
+      <div class="panel"><div class="ph"><span id="dLatencyLabel">延迟</span><span class="muted" style="font-weight:normal">橙线为平均值，浅色区间为最小~最大</span><span class="r muted" id="dBucket"></span></div><div class="pb"><div id="cLat"></div></div></div>
+      <div class="panel"><div class="ph"><span id="dLossLabel">丢包率</span><span class="muted" id="dLossHint" style="font-weight:normal">红色为全部丢失，橙色为部分丢失</span></div><div class="pb"><div id="cLoss"></div></div></div>
     </div>`;
+    function configuredPorts() {
+      const target = findTarget(id);
+      return target && target.obj.monitor && target.obj.monitor.tcp_ports || [];
+    }
+    function currentStatus() {
+      return selectedPort ? (S.tcpStatus || []).find(st => st.parent_id === id && st.port === selectedPort) : S.status[id];
+    }
+    function drawPorts(refreshInput = false) {
+      const ports = configuredPorts();
+      if (refreshInput && document.activeElement !== $('#tcpMonitorForm').elements.ports) $('#tcpMonitorForm').elements.ports.value = ports.join(',');
+      const select = $('#monitorSeries');
+      const options = '<option value="0">ICMP Ping</option>' + ports.map(p => `<option value="${p}">TCPing :${p}</option>`).join('');
+      if (select.innerHTML !== options) { select.innerHTML = options; select.value = String(selectedPort); }
+      if (selectedPort && !ports.includes(selectedPort)) { selectedPort = 0; select.value = '0'; load(); }
+      $('#tcpMonitorRows').innerHTML = ports.length ? '<table><thead><tr><th>端口</th><th>状态</th><th>连接耗时</th><th>1m 失败率</th><th>操作</th></tr></thead><tbody>' + ports.map(port => {
+        const st = (S.tcpStatus || []).find(st => st.parent_id === id && st.port === port);
+        const target = findTarget(id), enabled = !(target && target.obj.monitor && target.obj.monitor.enabled === false);
+        return `<tr><td class="mono">${port}</td><td>${stateBadge(st ? st.state : enabled ? 'unknown' : 'disabled')}</td><td>${st ? fmtMs(st.last_rtt) : '—'}</td><td>${st ? pct(st.loss_1m) : '—'}</td><td><button class="btn small" data-tcp-history="${port}">曲线</button> <button class="btn small" data-tcp-remove="${port}" ${savingPorts ? 'disabled' : ''}>移除</button></td></tr>`;
+      }).join('') + '</tbody></table>' : '<p class="help">尚未配置 TCPing 监控。</p>';
+    }
+    async function savePorts(ports) {
+      if (savingPorts) return;
+      if (ports.length > 16) { toast('最多监控 16 个 TCP 端口', true); return; }
+      savingPorts = true;
+      $('#tcpMonitorForm').querySelector('button').disabled = true;
+      try {
+        await api('PUT', 'api/ports/monitoring', {id, ports});
+        await loadTopology();
+        if (alive) { drawPorts(true); toast('TCPing 监控已保存'); }
+      } catch (e) { if (alive) toast(errMsg(e), true); }
+      finally { savingPorts = false; if (alive) { $('#tcpMonitorForm').querySelector('button').disabled = false; drawPorts(); } }
+    }
+    $('#tcpMonitorForm').onsubmit = ev => {
+      ev.preventDefault();
+      try { savePorts(parseTCPPorts(ev.currentTarget.elements.ports.value, 16)); } catch(e) { toast(e.message, true); }
+    };
+    $('#monitorSeries').onchange = ev => { selectedPort = Number(ev.target.value); drawTiles(); load(); };
+    $('#tcpMonitorRows').onclick = ev => {
+      const b = ev.target.closest('button'); if (!b) return;
+      if (b.dataset.tcpRemove) savePorts(configuredPorts().filter(p => p !== Number(b.dataset.tcpRemove)));
+      if (b.dataset.tcpHistory) { selectedPort = Number(b.dataset.tcpHistory); $('#monitorSeries').value = String(selectedPort); drawTiles(); load(); }
+    };
+    $('#portScanResults').onclick = ev => {
+      const b = ev.target.closest('[data-monitor-port]'); if (!b) return;
+      savePorts([...new Set([...configuredPorts(), Number(b.dataset.monitorPort)])]);
+    };
+    $('#cancelPortScan').onclick = () => { if (scanController) scanController.abort(); };
+    $('#portScanForm').onsubmit = async ev => {
+      ev.preventDefault(); if (scanController) return;
+      let ports;
+      try { ports = parseTCPPorts(ev.currentTarget.elements.ports.value, 1024); if (!ports.length) throw new Error("请至少填写一个扫描端口"); } catch(e) { toast(e.message, true); return; }
+      scanController = new AbortController();
+      $('#portScanForm').querySelector('button').disabled = true; $('#cancelPortScan').disabled = false;
+      $('#portScanState').textContent = `正在扫描 ${ports.length} 个端口…`;
+      $('#portScanResults').innerHTML = '';
+      try {
+        const result = await api('POST', 'api/ports/scan', {id, ports}, {signal: scanController.signal});
+        if (!alive) return;
+        $('#portScanState').textContent = result.summary.verdict;
+        const labels = {open:'开放', refused:'拒绝连接', timeout:'超时', error:'错误'};
+        $('#portScanResults').innerHTML = '<table><thead><tr><th>端口 / 服务</th><th>探测结果</th><th>耗时</th><th></th></tr></thead><tbody>' + result.ports.map(p => `<tr><td>${p.port} ${esc(p.service || '')}</td><td title="${esc(p.error || '')}">${labels[p.state] || esc(p.state)}</td><td>${p.ms == null ? '—' : fmtMs(p.ms)}</td><td><button class="btn small" data-monitor-port="${p.port}">加入监控</button></td></tr>`).join('') + '</tbody></table>';
+      } catch(e) { if (alive) $('#portScanState').textContent = e.name === 'AbortError' ? '扫描已取消' : errMsg(e); }
+      finally { scanController = null; if (alive) { $('#portScanForm').querySelector('button').disabled = false; $('#cancelPortScan').disabled = true; } }
+    };
     const R = [['15m', '15 分钟'], ['1h', '1 小时'], ['6h', '6 小时'], ['24h', '24 小时'], ['7d', '7 天'], ['30d', '30 天']];
     function drawRanges() {
       $('#ranges').innerHTML = R.map(([k, t]) => `<button class="chip${k === range ? ' on' : ''}" data-r="${k}">${t}</button>`).join('');
@@ -1718,34 +1809,38 @@
         ' ' + (o.monitor && o.monitor.alert ? '<span class="badge" style="color:var(--accent)">告警已开启</span>' : '<span class="badge unknown">不告警</span>');
     }
     function drawTiles() {
-      const st = S.status[id];
+      $('#dLatencyLabel').textContent = selectedPort ? `TCP :${selectedPort} 连接耗时` : '延迟';
+      $('#dLossLabel').textContent = selectedPort ? 'TCP 连接失败率' : '丢包率';
+      $('#dLossHint').textContent = selectedPort ? '红色为全部失败，橙色为部分失败' : '红色为全部丢失，橙色为部分丢失';
+      const st = currentStatus();
       if (!st) { $('#dTiles').innerHTML = '<div><div class="k">状态</div><div class="v">未监控</div></div>'; return; }
       const tile = (k, v, c) => `<div><div class="k">${k}</div><div class="v ${c || ''}">${v}</div></div>`;
-      $('#dTiles').innerHTML = tile('状态', stateBadge(st.state)) + tile('当前延迟', fmtMs(st.last_rtt), st.last_rtt < 0 ? 'v-down' : '') +
+      $('#dTiles').innerHTML = tile('状态', stateBadge(st.state)) + tile(selectedPort ? 'TCP 连接耗时' : '当前延迟', fmtMs(st.last_rtt), st.last_rtt < 0 ? 'v-down' : '') +
         tile('1m 平均', st.avg_1m ? fmtMs(st.avg_1m) : '-') + tile('1m 最小/最大', st.avg_1m ? `${fmtMs(st.min_1m)}/${fmtMs(st.max_1m)}` : '-') +
         tile('抖动', st.jitter_1m ? fmtMs(st.jitter_1m) : '-') + tile('1h 平均', st.avg_1h ? fmtMs(st.avg_1h) : '-') +
-        tile('1m 丢包', pct(st.loss_1m), lossCls(st.loss_1m, st.loss_warn_pct)) + tile('5m 丢包', pct(st.loss_5m), lossCls(st.loss_5m, st.loss_warn_pct)) +
-        tile('1h 丢包', pct(st.loss_1h), lossCls(st.loss_1h, st.loss_warn_pct)) + tile('状态持续', fmtAgo(st.state_since));
+        tile(selectedPort ? '1m 失败率' : '1m 丢包', pct(st.loss_1m), lossCls(st.loss_1m, st.loss_warn_pct)) + tile(selectedPort ? '5m 失败率' : '5m 丢包', pct(st.loss_5m), lossCls(st.loss_5m, st.loss_warn_pct)) +
+        tile(selectedPort ? '1h 失败率' : '1h 丢包', pct(st.loss_1h), lossCls(st.loss_1h, st.loss_warn_pct)) + tile('状态持续', fmtAgo(st.state_since));
     }
     async function load() {
       clearTimeout(timer);
+      const version = ++loadVersion;
       try {
-        const d = await api('GET', `api/history/${encodeURIComponent(id)}?range=${range}`);
-        if (!alive) return;
-        const st = S.status[id];
+        const d = await api('GET', `api/history/${encodeURIComponent(id)}?range=${range}${selectedPort ? '&port=' + selectedPort : ''}`);
+        if (!alive || version !== loadVersion) return;
+        const st = currentStatus();
         Charts.latency($('#cLat'), d, st ? st.latency_warn_ms : null);
         Charts.loss($('#cLoss'), d);
         const b = d.bucket_ms;
         $('#dBucket').textContent = '每点 ' + (b >= 60000 ? b / 60000 + ' 分钟' : b / 1000 + ' 秒');
       } catch (e) { toast(errMsg(e), true); }
-      if (alive) timer = setTimeout(load, ['15m', '1h'].includes(range) ? 5000 : 60000);
+      if (alive && version === loadVersion) timer = setTimeout(load, ['15m', '1h'].includes(range) ? 5000 : 60000);
     }
-    drawRanges(); drawHead(); drawTiles(); load();
+    drawRanges(); drawHead(); drawPorts(true); drawTiles(); load();
     const onResize = () => load();
     window.addEventListener('resize', onResize);
     return {
-      update: drawTiles, onTopology: drawHead,
-      destroy() { alive = false; clearTimeout(timer); window.removeEventListener('resize', onResize); },
+      update: () => { drawTiles(); drawPorts(); }, onTopology: () => { drawHead(); drawPorts(true); },
+      destroy() { alive = false; if (scanController) scanController.abort(); clearTimeout(timer); window.removeEventListener('resize', onResize); },
     };
   }
 
@@ -1754,7 +1849,7 @@
   function alertsPage(app) {
     let timer = 0;
     app.innerHTML = `<div class="page pad">
-      <div class="toolbar"><b>告警记录</b><span class="muted">最近 300 条；企业微信通道在「设置」中配置</span>
+      <div class="toolbar"><b>告警记录</b><span class="muted">最近 300 条；通知渠道在「设置」中配置</span>
         <span style="margin-left:auto" id="aState"></span></div>
       <table class="grid"><thead><tr><th>时间</th><th>类型</th><th>IP</th><th>名称</th><th>位置</th><th>说明</th><th>发送</th></tr></thead><tbody id="abody"></tbody></table>
     </div>`;
@@ -1773,7 +1868,7 @@
     $('#abody').onclick = e => { const tr = e.target.closest('tr[data-id]'); if (tr && tr.dataset.id) location.hash = '#/node/' + encodeURIComponent(tr.dataset.id); };
     api('GET', 'api/config').then(c => {
       const on = S.topo ? S.topo.nodes.filter(n => n.monitor && n.monitor.alert).length + S.topo.switches.filter(x => x.monitor && x.monitor.alert).length : 0;
-      $('#aState').innerHTML = (c.alert.enabled ? '<span class="badge ok">企业微信告警已启用</span>' : '<span class="badge down">企业微信告警未启用</span> <a href="#/settings">去设置</a>') +
+      $('#aState').innerHTML = (c.alert.enabled ? '<span class="badge ok">告警通知已启用</span>' : '<span class="badge down">告警通知未启用</span> <a href="#/settings">去设置</a>') +
         ` <span class="muted">· 已开告警设备 ${on} 台（设备默认不告警，可在 <a href="#/list">监控列表</a> 中开启）· ${esc(c.schedule.enabled ? '监控时段：' + describeSchedule(c.schedule) : '全天候监控')}</span>`;
     }).catch(() => {});
     load();
@@ -1785,7 +1880,7 @@
   function settingsPage(app) {
     app.innerHTML = `<div class="page pad"><div class="settings">
       <div>
-        <div class="panel"><div class="ph">企业微信机器人告警</div><div class="pb"><form id="af"></form></div></div>
+        <div class="panel"><div class="ph">告警通知渠道</div><div class="pb"><form id="af"></form></div></div>
         <div class="panel"><div class="ph">监控时段<span class="r" id="schNow"></span></div><div class="pb"><form id="schf"></form></div></div>
         <div class="panel"><div class="ph">默认 Ping 参数</div><div class="pb"><form id="pf"></form></div></div>
         <div class="panel"><div class="ph">机房信息</div><div class="pb"><form id="sitef"></form></div></div>
@@ -1823,7 +1918,14 @@
       $('#af').innerHTML = `
         <div class="checks" style="margin-bottom:8px"><label><input type="checkbox" name="enabled" ${a.enabled ? 'checked' : ''}> 启用告警推送</label>
           <label><input type="checkbox" name="send_recovery" ${a.send_recovery ? 'checked' : ''}> 发送恢复通知</label></div>
-        <label class="f"><span>Webhook 地址（群聊 → 添加群机器人 → 复制 Webhook）</span><input type="text" name="webhook_url" value="${esc(a.webhook_url)}" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..."></label>
+        <label class="f"><span>企业微信 Webhook 地址（可选）</span><input type="text" name="webhook_url" value="${esc(a.webhook_url)}" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..."></label>
+        <div class="help">填写地址的渠道都会接收告警；清空地址即可停用该渠道。多个渠道同时发送，使用下方统一规则。</div>
+        <label class="f"><span>钉钉 Webhook</span><input type="text" name="dingtalk_url" value="${esc(a.dingtalk_url || '')}" autocomplete="off"></label>
+        <label class="f"><span>钉钉加签密钥（可选）</span><input type="password" name="dingtalk_secret" value="${esc(a.dingtalk_secret || '')}" autocomplete="off"></label>
+        <label class="f"><span>飞书 Webhook</span><input type="text" name="feishu_url" value="${esc(a.feishu_url || '')}" autocomplete="off"></label>
+        <label class="f"><span>飞书签名密钥（可选）</span><input type="password" name="feishu_secret" value="${esc(a.feishu_secret || '')}" autocomplete="off"></label>
+        <label class="f"><span>Slack Incoming Webhook</span><input type="text" name="slack_url" value="${esc(a.slack_url || '')}" autocomplete="off"></label>
+        <label class="f"><span>通用 Webhook（JSON：title、text）</span><input type="text" name="generic_webhook_url" value="${esc(a.generic_webhook_url || '')}" autocomplete="off"></label>
         <label class="f"><span>消息标题</span><input type="text" name="site_title" value="${esc(a.site_title)}"></label>
         <div class="row3">
           ${num('down_after_failures', '连续失败 N 次判离线', a.down_after_failures, 'min="1"')}
@@ -1902,7 +2004,7 @@
       const e = ev.target.elements;
       const c = JSON.parse(JSON.stringify(cfg));
       Object.assign(c.alert, {
-        enabled: e.enabled.checked, send_recovery: e.send_recovery.checked, webhook_url: e.webhook_url.value.trim(), site_title: e.site_title.value.trim(),
+        enabled: e.enabled.checked, send_recovery: e.send_recovery.checked, webhook_url: e.webhook_url.value.trim(), dingtalk_url: e.dingtalk_url.value.trim(), dingtalk_secret: e.dingtalk_secret.value.trim(), feishu_url: e.feishu_url.value.trim(), feishu_secret: e.feishu_secret.value.trim(), slack_url: e.slack_url.value.trim(), generic_webhook_url: e.generic_webhook_url.value.trim(), site_title: e.site_title.value.trim(),
         down_after_failures: +e.down_after_failures.value, up_after_successes: +e.up_after_successes.value, merge_window_sec: +e.merge_window_sec.value,
         loss_duration_min: +e.loss_duration_min.value, latency_duration_min: +e.latency_duration_min.value, repeat_interval_min: +e.repeat_interval_min.value,
         proxy_url: e.proxy_url.value.trim(), tls_skip_verify: e.tls_skip_verify.checked,
@@ -1912,9 +2014,9 @@
     $('#af').addEventListener('click', async ev => {
       if (ev.target.id !== 'aTest') return;
       const e = $('#af').elements;
-      const a = Object.assign({}, cfg.alert, { webhook_url: e.webhook_url.value.trim(), site_title: e.site_title.value.trim(), proxy_url: e.proxy_url.value.trim(), tls_skip_verify: e.tls_skip_verify.checked });
+      const a = Object.assign({}, cfg.alert, { webhook_url: e.webhook_url.value.trim(), dingtalk_url: e.dingtalk_url.value.trim(), dingtalk_secret: e.dingtalk_secret.value.trim(), feishu_url: e.feishu_url.value.trim(), feishu_secret: e.feishu_secret.value.trim(), slack_url: e.slack_url.value.trim(), generic_webhook_url: e.generic_webhook_url.value.trim(), site_title: e.site_title.value.trim(), proxy_url: e.proxy_url.value.trim(), tls_skip_verify: e.tls_skip_verify.checked });
       ev.target.disabled = true;
-      try { await api('POST', 'api/alert/test', a); toast('测试消息已发送，请在企业微信群中确认'); }
+      try { await api('POST', 'api/alert/test', a); toast('测试消息已发送，请在已配置的各渠道中确认'); }
       catch (err) { toast('发送失败：' + errMsg(err), true); }
       ev.target.disabled = false;
     });
@@ -2070,7 +2172,7 @@
           <li>工作日 8 点到 20 点监控，其余时间暂停</li>
           <li>扫描一下网段，有哪些新设备、哪些设备换了 IP？把新发现的打印机放到接入交换机 Port 7</li>
           <li>新建一个自动扫描任务“办公区”，每 15 分钟扫描 192.168.10.0/24 和 192.168.11.0/24，新设备打上“办公区”标签，先立即扫一次</li>
-          <li>把企业微信告警的重复提醒改成 60 分钟，然后发一条测试消息</li>
+          <li>把告警通知的重复提醒改成 60 分钟，然后发一条测试消息</li>
           <li>192.168.101.88 这台电脑实际插在哪个口？和登记的一致吗？不一致就帮我改过来</li>
           <li>接入交换机 12 口后面都接了哪些设备？</li>
           <li>先预览一次自动定位，把未定位的设备都挂到对应端口，端口变了的列给我确认</li>
@@ -2512,7 +2614,7 @@
       $('#df').innerHTML = `
         <div class="checks" style="margin-bottom:8px">
           <label><input type="checkbox" name="fast_resolve" ${d.fast_resolve ? 'checked' : ''}> 快速重解析（离线时先找新 IP）</label>
-          <label><input type="checkbox" name="notify" ${d.notify ? 'checked' : ''}> 新增设备 / IP 变化推送企业微信</label>
+          <label><input type="checkbox" name="notify" ${d.notify ? 'checked' : ''}> 新增设备 / IP 变化推送通知</label>
         </div>
         <div class="row3">
           <label class="f"><span>IP 跟踪范围</span><select name="ip_tracking">
@@ -2733,7 +2835,7 @@
               ${esc([d.vendor, d.hostname].filter(Boolean).join(' · '))}<div class="muted">${esc(d.evidence || '')}</div>
               ${d.model ? `<div class="muted mono" style="font-size:11px">${esc(d.model)}</div>` : ''}</td>
             <td style="white-space:nowrap">${d.switch ? esc(d.attach || swName(d.switch) + ' 口 ' + d.port) : '<span class="muted">未定位</span>'}</td>
-            <td><input type="checkbox" class="aidA" data-i="${i}" ${d.alert ? 'checked' : ''} title="推送企业微信告警"></td></tr>`).join('')}</tbody></table></div>`
+            <td><input type="checkbox" class="aidA" data-i="${i}" ${d.alert ? 'checked' : ''} title="推送告警通知"></td></tr>`).join('')}</tbody></table></div>`
             : '<div class="help">没有发现需要添加的新设备。</div>'}
           ${dropped.length ? `<details class="help"><summary>已忽略 ${dropped.length} 条不可信或重复的建议</summary>${dropped.map(x => `<div><span class="mono">${esc(x.ip)}</span> ${esc(x.reason)}</div>`).join('')}</details>` : ''}
         </div>
@@ -3023,7 +3125,7 @@ snmp-agent community read 团体名</pre></div></div>
       $('#lf').innerHTML = `
         <div class="checks" style="margin-bottom:8px">
           <label><input type="checkbox" name="enabled" ${l.enabled ? 'checked' : ''}> 定时定位</label>
-          <label><input type="checkbox" name="notify" ${l.notify ? 'checked' : ''}> 端口变化推送企业微信</label></div>
+          <label><input type="checkbox" name="notify" ${l.notify ? 'checked' : ''}> 端口变化推送通知</label></div>
         <div class="row3">
           <label class="f"><span>默认只读团体名</span><input type="text" name="community" value="${esc(l.community || '')}" placeholder="未设置" autocomplete="off"></label>
           <label class="f"><span>定位间隔（分钟，≥2）</span><input type="number" name="interval_min" min="2" value="${l.interval_min}"></label>

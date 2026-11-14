@@ -105,3 +105,32 @@ func TestMCPScanJobsAndSettings(t *testing.T) {
 		t.Fatalf("get_discovery: %s", txt)
 	}
 }
+
+func TestMCPNotificationChannels(t *testing.T) {
+	s, ts := newTestServer(t)
+	txt, bad := call(t, ts, "set_alert_config", map[string]interface{}{
+		"enabled": true, "feishu_url": "https://example.com/private-hook", "feishu_secret": "private-secret",
+	})
+	if bad || strings.Contains(txt, "private-") {
+		t.Fatalf("update or masking failed: %s", txt)
+	}
+	if a := s.Cfg.Get().Alert; a.FeishuSecret != "private-secret" || !a.Enabled {
+		t.Fatal("settings not stored")
+	}
+	txt, bad = call(t, ts, "get_settings", map[string]interface{}{})
+	if bad || strings.Contains(txt, "private-") {
+		t.Fatalf("settings leaked secret: %s", txt)
+	}
+	_, bad = call(t, ts, "set_alert_config", map[string]interface{}{"site_title": "test"})
+	if bad || s.Cfg.Get().Alert.FeishuSecret != "private-secret" {
+		t.Fatal("patch lost secret")
+	}
+	_, bad = call(t, ts, "set_alert_config", map[string]interface{}{"feishu_url": ""})
+	if !bad {
+		t.Fatal("enabled without channel accepted")
+	}
+	_, bad = call(t, ts, "set_alert_config", map[string]interface{}{"enabled": false, "feishu_url": "", "feishu_secret": ""})
+	if bad || s.Cfg.Get().Alert.HasChannels() {
+		t.Fatal("clear failed")
+	}
+}

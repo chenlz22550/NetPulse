@@ -1,4 +1,4 @@
-// Package alert 根据实时指标判定离线/丢包/延迟高等事件，并合并发送到企业微信。
+// Package alert 根据实时指标判定离线/丢包/延迟高等事件，并合并发送到已配置渠道。
 package alert
 
 import (
@@ -96,7 +96,7 @@ func NewEngine(cfg func() config.Config, mon *monitor.Monitor, histPath string) 
 	e := &Engine{
 		cfg:      cfg,
 		mon:      mon,
-		send:     SendWeCom,
+		send:     SendNotifications,
 		histPath: histPath,
 		info:     map[string]targetInfo{},
 		states:   map[string]*tstate{},
@@ -139,6 +139,22 @@ func (e *Engine) SetTopology(t *topology.Topology) {
 			children[n.Attach.Switch]++
 		}
 	}
+	for _, n := range t.Nodes {
+		for _, port := range n.Monitor.TCPPorts {
+			inf := info[n.ID]
+			inf.Name += fmt.Sprintf(" TCP:%d", port)
+			inf.Parent = ""
+			info[monitor.TCPID(n.ID, port)] = inf
+		}
+	}
+	for _, sw := range t.Switches {
+		for _, port := range sw.Monitor.TCPPorts {
+			inf := info[sw.ID]
+			inf.Name += fmt.Sprintf(" TCP:%d", port)
+			inf.Parent = ""
+			info[monitor.TCPID(sw.ID, port)] = inf
+		}
+	}
 	e.mu.Lock()
 	e.site = t.Site.Name
 	e.info = info
@@ -159,7 +175,7 @@ func (e *Engine) Run(stop <-chan struct{}) {
 			if e.mon.Paused() {
 				continue
 			}
-			e.Evaluate(now, e.mon.Statuses(false))
+			e.Evaluate(now, append(e.mon.Statuses(false), e.mon.TCPStatuses(false)...))
 			e.flushIfDue(now)
 		}
 	}
@@ -268,7 +284,7 @@ func (e *Engine) flushIfDue(now time.Time) {
 	if cfg.Enabled && toSend > 0 {
 		sendErr = e.send(cfg, content)
 		if sendErr != nil {
-			log.Printf("发送企业微信告警失败: %v", sendErr)
+			log.Printf("发送告警通知失败: %v", sendErr)
 		}
 	}
 	for i := range evs {

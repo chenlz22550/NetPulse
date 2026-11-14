@@ -103,7 +103,7 @@ func (s *Server) optContext() (string, map[string]interface{}) {
 	now := time.Now()
 	var b strings.Builder
 	fmt.Fprintf(&b, "【默认 ping 参数】间隔 %dms，延迟阈值 %dms，丢包阈值 %.0f%%；企业微信告警通道：%v；监控时段：%s\n",
-		cfg.Ping.IntervalMs, cfg.Ping.LatencyWarnMs, cfg.Ping.LossWarnPct, cfg.Alert.Enabled && cfg.Alert.WebhookURL != "", cfg.Schedule.Describe())
+		cfg.Ping.IntervalMs, cfg.Ping.LatencyWarnMs, cfg.Ping.LossWarnPct, cfg.Alert.Enabled && cfg.Alert.HasChannels(), cfg.Schedule.Describe())
 	fmt.Fprintf(&b, "网关：%s\n\n", t.Site.Gateway)
 
 	b.WriteString("【网络设备（交换机/路由器/防火墙/光猫/AP 等）】id | 名称 | 类型 | 角色 | IP | 厂商/型号 | 位置 | 告警 | 状态 | 下挂节点数\n")

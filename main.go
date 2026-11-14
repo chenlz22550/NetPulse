@@ -92,7 +92,7 @@ func main() {
 	notify := func(page string) func(title string, lines []string) {
 		return func(title string, lines []string) {
 			c := cfgMgr.Get().Alert
-			if !c.Enabled || c.WebhookURL == "" {
+			if !c.Enabled || !c.HasChannels() {
 				return
 			}
 			content := "### " + c.SiteTitle + " · " + title + "\n"
@@ -103,7 +103,7 @@ func main() {
 				}
 				content += l + "\n"
 			}
-			if err := alert.SendWeCom(c, content); err != nil {
+			if err := alert.SendNotifications(c, content); err != nil {
 				log.Printf("发送%s通知失败: %v", page, err)
 			}
 		}

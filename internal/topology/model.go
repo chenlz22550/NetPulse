@@ -25,6 +25,7 @@ type Position struct {
 
 // MonitorSpec 单个节点的监控参数，零值表示继承 config.yaml 中的默认值。
 type MonitorSpec struct {
+	TCPPorts      []int   `yaml:"tcp_ports,omitempty" json:"tcp_ports,omitempty"`
 	Enabled       *bool   `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	Alert         bool    `yaml:"alert,omitempty" json:"alert,omitempty"` // 是否推送告警，默认关闭
 	IntervalMs    int     `yaml:"interval_ms,omitempty" json:"interval_ms,omitempty"`
@@ -359,6 +360,9 @@ func (t *Topology) Validate() []string {
 	}
 	ips := map[string]string{}
 	for _, s := range t.Switches {
+		if err := ValidateTCPPorts(s.Monitor.TCPPorts); err != nil {
+			add("交换机 %s: %v", s.ID, err)
+		}
 		claim("交换机", s.ID)
 		if s.IP != "" {
 			if prev, ok := ips[s.IP]; ok {
@@ -380,6 +384,9 @@ func (t *Topology) Validate() []string {
 		}
 	}
 	for _, n := range t.Nodes {
+		if err := ValidateTCPPorts(n.Monitor.TCPPorts); err != nil {
+			add("节点 %s: %v", n.ID, err)
+		}
 		claim("节点", n.ID)
 		if err := checkIP("节点 "+n.ID+" ip", n.IP); err != nil {
 			add("%v", err)
@@ -422,4 +429,22 @@ type ValidationError struct{ Problems []string }
 
 func (e *ValidationError) Error() string {
 	return "拓扑校验失败:\n- " + strings.Join(e.Problems, "\n- ")
+}
+
+// ValidateTCPPorts keeps continuous monitoring bounded and rejects duplicate targets.
+func ValidateTCPPorts(ports []int) error {
+	if len(ports) > 16 {
+		return fmt.Errorf("TCPing 最多监控 16 个端口")
+	}
+	seen := map[int]bool{}
+	for _, port := range ports {
+		if port < 1 || port > 65535 {
+			return fmt.Errorf("TCP 端口 %d 不合法（1–65535）", port)
+		}
+		if seen[port] {
+			return fmt.Errorf("TCP 端口 %d 重复", port)
+		}
+		seen[port] = true
+	}
+	return nil
 }

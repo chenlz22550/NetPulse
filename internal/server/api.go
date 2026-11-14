@@ -7,6 +7,7 @@ import (
 	"math"
 	"net/http"
 	"sort"
+	"strconv"
 	"time"
 
 	"netping/internal/config"
@@ -362,6 +363,7 @@ func (s *Server) statusPayload() map[string]interface{} {
 		"schedule":        s.Cfg.Get().Schedule.Describe(),
 		"summary":         sum,
 		"statuses":        byID,
+		"tcp_statuses":    s.Mon.TCPStatuses(true),
 		"active_down":     s.Alerts.ActiveDown(),
 		"changed_on_disk": s.Topo.ChangedOnDisk(),
 		"server_time":     time.Now().UnixMilli(),
@@ -428,6 +430,13 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request, id string
 	if rg == "" {
 		rg = "1h"
 	}
+	if p := r.URL.Query().Get("port"); p != "" {
+		port, err := strconv.Atoi(p)
+		if err != nil || port < 1 || port > 65535 || !topology.ValidID(id) {
+			return badRequest("节点或端口不合法")
+		}
+		id = monitor.TCPID(id, port)
+	}
 	h, err := s.history(id, rg, 720)
 	if err != nil {
 		return err
@@ -447,7 +456,7 @@ type historyResult struct {
 
 // history 按时间范围聚合延迟/丢包数据，最多约 maxPoints 个点。
 func (s *Server) history(id, rg string, maxPoints int) (*historyResult, error) {
-	if !topology.ValidID(id) {
+	if !topology.ValidID(id) && !monitor.ValidTCPID(id) {
 		return nil, badRequest("id 不合法")
 	}
 	dur, ok := ranges[rg]

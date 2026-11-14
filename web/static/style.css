@@ -487,3 +487,9 @@ svg.picking .card:hover .bg { stroke: var(--accent); stroke-width: 2.5; }
 .node-ssh:hover rect, .node-ssh:focus rect { stroke: var(--accent); }
 
 .card.gateway .node-ssh text { fill: var(--ink) !important; }
+
+.tcp-config { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.tcp-config input { min-width: 0; width: 100%; }
+#portScanResults, #tcpMonitorRows { overflow-x: auto; }
+#portScanResults { max-height: 360px; margin-bottom: 12px; }
+@media (max-width: 600px) { .tcp-config { grid-template-columns: minmax(0, 1fr); } }

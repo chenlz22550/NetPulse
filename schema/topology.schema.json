@@ -61,7 +61,8 @@
       "additionalProperties": false,
       "description": "监控参数，省略的字段继承 config.yaml 中 ping 的默认值",
       "properties": {
-        "enabled": { "type": "boolean", "default": true, "description": "是否 ping 监控" },
+        "enabled": { "type": "boolean", "default": true, "description": "是否启用 Ping 和 TCPing 监控" },
+        "tcp_ports": { "type": "array", "maxItems": 16, "uniqueItems": true, "items": { "type": "integer", "minimum": 1, "maximum": 65535 }, "description": "持续 TCPing 端口；各端口独立记录延迟、失败率和历史，沿用设备监控参数" },
         "alert": { "type": "boolean", "default": false, "description": "是否推送企业微信告警；默认不告警，需要告警的设备显式设为 true" },
         "interval_ms": { "type": "integer", "minimum": 200, "description": "ping 间隔毫秒" },
         "timeout_ms": { "type": "integer", "minimum": 1, "description": "超时毫秒" },

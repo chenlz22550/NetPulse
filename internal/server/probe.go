@@ -469,6 +469,12 @@ func isRefused(err error) bool {
 }
 
 func toolTCPCheck(s *Server, a map[string]json.RawMessage, _ string) (interface{}, error) {
+	return scanTCP(context.Background(), s, a, 16)
+}
+
+func scanTCP(ctx context.Context, s *Server, a map[string]json.RawMessage, limit int) (interface{}, error) {
+	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
 	t, _ := s.Topo.Snapshot()
 	id, ip, err := probeTarget(t, a)
 	if err != nil {
@@ -483,8 +489,8 @@ func toolTCPCheck(s *Server, a map[string]json.RawMessage, _ string) (interface{
 	if len(ports) == 0 {
 		ports = defaultTCPPorts
 	}
-	if len(ports) > 16 {
-		return nil, errors.New("ports 最多 16 个")
+	if len(ports) > limit {
+		return nil, fmt.Errorf("ports 最多 %d 个", limit)
 	}
 	seen := map[int]bool{}
 	var uniq []int
@@ -508,13 +514,21 @@ func toolTCPCheck(s *Server, a map[string]json.RawMessage, _ string) (interface{
 	}
 	out := make([]result, len(uniq))
 	var wg sync.WaitGroup
+	slots := make(chan struct{}, 32)
 	for i, p := range uniq {
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+			wg.Wait()
+			return nil, ctx.Err()
+		}
 		wg.Add(1)
 		go func(i, p int) {
 			defer wg.Done()
+			defer func() { <-slots }()
 			r := result{Port: p, Service: tcpPortNames[p]}
 			start := time.Now()
-			conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip, fmt.Sprint(p)), timeout)
+			conn, err := (&net.Dialer{Timeout: timeout}).DialContext(ctx, "tcp", net.JoinHostPort(ip, fmt.Sprint(p)))
 			el := r2(float64(time.Since(start).Microseconds()) / 1000)
 			switch {
 			case err == nil:
@@ -535,6 +549,9 @@ func toolTCPCheck(s *Server, a map[string]json.RawMessage, _ string) (interface{
 		}(i, p)
 	}
 	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	open, refused := 0, 0
 	for _, r := range out {
 		switch r.State {
@@ -551,7 +568,7 @@ func toolTCPCheck(s *Server, a map[string]json.RawMessage, _ string) (interface{
 	case refused > 0:
 		verdict = "主机在线（端口拒绝连接说明主机回应了 TCP），但这些端口没有开放服务"
 	default:
-		verdict = "全部超时：主机可能不在线，或防火墙丢弃了这些端口的连接（不能据此断定离线，可结合 arp_lookup）"
+		verdict = "未发现可连接端口：主机可能不在线、端口被过滤或探测出错，请结合各端口结果判断（不能据此断定离线，可结合 arp_lookup）"
 	}
 	return map[string]interface{}{
 		"ip": ip, "timeout_ms": timeout.Milliseconds(), "ports": out,
