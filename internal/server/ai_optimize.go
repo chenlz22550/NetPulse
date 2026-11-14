@@ -524,6 +524,7 @@ func snapOf(t *topology.Topology, id string) (devSnap, bool) {
 }
 
 func (s *Server) handleAIOptimizeApply(w http.ResponseWriter, r *http.Request) error {
+	defer s.Topo.ProfileWork()()
 	var req struct {
 		Classify []struct {
 			ID       string `json:"id"`

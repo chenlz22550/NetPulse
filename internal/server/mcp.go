@@ -1310,6 +1310,7 @@ func toolSettings(s *Server, _ map[string]json.RawMessage, _ string) (interface{
 	al := c.Alert
 	al = maskAlertChannels(al)
 	return map[string]interface{}{
+		"active_profile":       s.activeProfileID(),
 		"schedule":             c.Schedule,
 		"schedule_description": c.Schedule.Describe(),
 		"in_schedule":          s.Mon.InSchedule(),
@@ -1904,14 +1905,21 @@ func toolScanNetwork(s *Server, a map[string]json.RawMessage, remote string) (in
 
 // updateConfig 读取当前配置、修改并保存。
 func (s *Server) updateConfig(fn func(c *config.Config) error) (config.Config, error) {
-	c := s.Cfg.Get()
+	defer s.Topo.ProfileWork()()
+	prev := s.Cfg.Get()
+	c := prev.Clone()
 	if err := fn(&c); err != nil {
 		return c, err
 	}
 	if err := s.Cfg.Update(c); err != nil {
 		return c, err
 	}
-	return s.Cfg.Get(), nil
+	updated := s.Cfg.Get()
+	if err := s.syncActiveRoomSettings(updated); err != nil {
+		_ = s.Cfg.Update(prev)
+		return prev, err
+	}
+	return updated, nil
 }
 
 // patchStruct 把 a 中提供的字段覆盖到 *ptr 上（未提供的保持不变，未知字段报错）。

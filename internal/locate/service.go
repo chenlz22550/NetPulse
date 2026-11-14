@@ -83,6 +83,36 @@ func New(cfg *config.Manager, topo *topology.Store, dataDir string) *Service {
 	return s
 }
 
+// DataDir returns the current data directory for locate state.
+func (s *Service) DataDir() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.dataDir
+}
+
+// SwitchDataDir switches the locate state directory and reloads room-scoped locate_last.json.
+func (s *Service) SwitchDataDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.running {
+		return ErrRunning
+	}
+	s.dataDir = dir
+	s.last = nil
+	s.tables = map[string]*snmp.Table{}
+	s.notified = map[string]bool{}
+	if data, err := os.ReadFile(s.path()); err == nil {
+		var r RunResult
+		if json.Unmarshal(data, &r) == nil {
+			s.last = &r
+		}
+	}
+	return nil
+}
+
 func (s *Service) path() string { return filepath.Join(s.dataDir, "locate_last.json") }
 
 // ErrRunning 表示定位正在进行。
@@ -226,6 +256,7 @@ func (s *Service) read(tg Target) (*snmp.Table, error) {
 
 // RunNow 读取所有交换机并定位。dryRun 只返回结果不写入；applyMoves 同时修改端口变化的设备。
 func (s *Service) RunNow(reason string, dryRun, applyMoves bool, only ...string) (*RunResult, error) {
+	defer s.Topo.ProfileWork()()
 	targets := s.Targets()
 	if len(targets) == 0 {
 		return nil, ErrNoTargets
@@ -272,10 +303,12 @@ func (s *Service) RunNow(reason string, dryRun, applyMoves bool, only ...string)
 	if !dryRun && len(only) == 0 {
 		s.mu.Lock()
 		s.last = r
+		dataDir := s.dataDir
+		p := s.path()
 		s.mu.Unlock()
 		data, _ := json.MarshalIndent(r, "", " ")
-		_ = os.MkdirAll(s.dataDir, 0o755)
-		if err := config.WriteFileAtomic(s.path(), data); err != nil {
+		_ = os.MkdirAll(dataDir, 0o755)
+		if err := config.WriteFileAtomic(p, data); err != nil {
 			log.Printf("保存定位结果失败: %v", err)
 		}
 		s.notify(r)
@@ -351,6 +384,7 @@ type PortMAC struct {
 
 // MACTable 返回交换机按端口分组的 MAC 表；refresh 为 true 或没有缓存时现场读取。
 func (s *Service) MACTable(switchID string, refresh bool) ([]PortRow, *SwitchStatus, error) {
+	defer s.Topo.ProfileWork()()
 	t, _ := s.Topo.Snapshot()
 	sw := t.FindSwitch(switchID)
 	if sw == nil {
@@ -421,6 +455,7 @@ func (s *Service) MACTable(switchID string, refresh bool) ([]PortRow, *SwitchSta
 
 // Find 返回某个 MAC 在各交换机上的出现位置与判定结果（使用缓存的 MAC 表，refresh 时重新读取）。
 func (s *Service) Find(mac string, refresh bool) (*Placement, []Sighting, string, error) {
+	defer s.Topo.ProfileWork()()
 	if refresh || len(s.cached()) == 0 {
 		targets := s.Targets()
 		if len(targets) == 0 {

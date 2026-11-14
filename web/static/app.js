@@ -27,6 +27,7 @@
   async function api(method, url, body, opts) {
     opts = opts || {};
     const init = { method, headers: {}, signal: opts.signal };
+    if (S.activeProfile) init.headers['X-NetPing-Profile'] = S.activeProfile;
     if (body !== undefined) {
       if (opts.text) { init.body = body; init.headers['Content-Type'] = 'text/plain; charset=utf-8'; }
       else { init.body = JSON.stringify(body); init.headers['Content-Type'] = 'application/json'; }
@@ -39,6 +40,9 @@
       throw new Error('登录已过期，请重新登录');
     }
     if (!r.ok) {
+      if ((r.status === 409 || (data && data.active_profile && S.activeProfile && data.active_profile !== S.activeProfile)) && !opts.skipProfileReset) {
+        resetProfileView();
+      }
       const e = new Error((data && data.error) || ('HTTP ' + r.status));
       e.problems = data && data.problems;
       throw e;
@@ -47,7 +51,7 @@
   }
   // 读取 NDJSON 流式接口（AI 分析），每行一个事件交给 onEvent
   async function streamNDJSON(url, body, signal, onEvent) {
-    const r = await fetch(url, { method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+    const r = await fetch(url, { method: 'POST', signal, headers: { 'Content-Type': 'application/json', ...(S.activeProfile ? { 'X-NetPing-Profile': S.activeProfile } : {}) }, body: JSON.stringify(body || {}) });
     if (!r.ok) {
       const d = await r.json().catch(() => ({}));
       if (r.status === 401 && d.login_required) { toLogin(); throw new Error('登录已过期，请重新登录'); }
@@ -178,8 +182,22 @@
 
   // ---------------------------------------------------------------------------
   // 数据同步
+  function resetProfileView(targetHash) {
+    if (page && page.destroy) page.destroy();
+    if (closeTerminal) closeTerminal();
+    ['np_report_cur', 'np_ai', 'np_aiopt', 'np_aid'].forEach(k => sessionStorage.removeItem(k));
+    if (targetHash) {
+      history.replaceState(null, '', targetHash);
+    } else if (/^#\/(node|report|ai)\//.test(location.hash)) {
+      history.replaceState(null, '', '#/topo');
+    }
+    location.reload();
+  }
   async function loadTopology() {
     const d = await api('GET', 'api/topology');
+    if (S.activeProfile && d.active_profile && S.activeProfile !== d.active_profile) { resetProfileView(); return; }
+    S.activeProfile = d.active_profile || '';
+    S.activeProfileName = d.active_profile_name || '';
     S.topo = d.topology;
     S.rev = d.rev;
     S.changedOnDisk = d.changed_on_disk;
@@ -204,6 +222,7 @@
     const es = new EventSource('api/stream');
     es.onmessage = ev => {
       const d = JSON.parse(ev.data);
+      if (d.active_profile && S.activeProfile && d.active_profile !== S.activeProfile) { resetProfileView(); return; }
       S.connected = true;
       S.status = d.statuses || {};
       S.tcpStatus = d.tcp_statuses || [];
@@ -539,8 +558,9 @@
         </form>
       </div>
       <div class="ai-side">
-        <div class="panel"><div class="ph">模型设置<span class="r" id="aiState"></span></div><div class="pb"><form id="aiSet"></form></div></div>
+        <div class="panel"><div class="ph">全局 · 模型设置<span class="r" id="aiState"></span></div><div class="pb"><form id="aiSet"></form></div></div>
         <div class="panel"><div class="ph">说明</div><div class="pb"><ul class="help" style="margin:0;padding-left:18px">
+          <li>模型与 API Key 为全局设置（所有机房共用）；诊断与探测仅针对当前激活机房。</li>
           <li>AI 会先看当前概况，再按需查询设备列表、历史曲线、告警记录、扫描与端口定位结果，最后给出结论和排查步骤。</li>
           <li>复杂问题会自动附带<b>可视化图表</b>（故障路径图、多设备对比柱状图、延迟丢包趋势曲线、异常时段对齐时间线），点击图中的设备可直接查看详情。</li>
           <li>AI 只能<b>查询</b>和<b>现场探测</b>（ping、TCP 端口、ARP、路由追踪、DNS、通过 SNMP 读交换机端口状态），不能修改任何配置。</li>
@@ -599,7 +619,7 @@
       let pendingBreak = false;
       try {
         const r = await fetch('api/ai/diagnose', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: ctl.signal,
+          method: 'POST', headers: { 'Content-Type': 'application/json', ...(S.activeProfile ? { 'X-NetPing-Profile': S.activeProfile } : {}) }, signal: ctl.signal,
           body: JSON.stringify({ messages: history.concat([{ role: 'user', content: question }]), focus: focus || '' }),
         });
         if (!r.ok) {
@@ -779,19 +799,23 @@
     if (!k) return '';
     const cell = (label, v, cls) => `<div class="rpt-kpi"><div class="k">${label}</div><div class="v ${cls || ''}">${v}</div></div>`;
     const av = k.availability_pct;
-    return `<div class="rpt-kpis">
-      ${cell('可用率', av.toFixed(2) + '%', av >= 99.9 ? 'v-ok' : av >= 99 ? 'v-warn' : 'v-down')}
-      ${cell('丢包率', k.loss_pct.toFixed(2) + '%', k.loss_pct >= 1 ? 'v-down' : k.loss_pct > 0 ? 'v-warn' : 'v-ok')}
-      ${cell('平均延迟', fmtMs(k.avg_ms))}
-      ${cell('累计中断', k.down_minutes + ' 分钟', k.down_minutes ? 'v-warn' : '')}
-      ${cell('告警事件', k.alerts + ' 条')}
-      ${cell('当前异常', k.abnormal_now + ' 台', k.abnormal_now ? 'v-down' : 'v-ok')}
-      ${cell('监控设备', k.with_data + ' / ' + k.monitored)}
+    const avCls = av == null ? 'muted' : av >= 99.9 ? 'v-ok' : av >= 99 ? 'v-warn' : 'v-down';
+    const lossCls = k.loss_pct == null ? 'muted' : k.loss_pct >= 1 ? 'v-down' : k.loss_pct > 0 ? 'v-warn' : 'v-ok';
+    const noDataBanner = k.has_data === false ? '<div class="banner" style="margin-bottom:12px">本周期无观测样本：可用率、丢包率、平均延迟与累计中断均显示「无数据」，不作健康判定。</div>' : '';
+    return `${noDataBanner}<div class="rpt-kpis">
+      ${cell('可用率', av == null ? '无数据' : av.toFixed(2) + '%', avCls)}
+      ${cell('丢包率', k.loss_pct == null ? '无数据' : k.loss_pct.toFixed(2) + '%', lossCls)}
+      ${cell('平均延迟', k.avg_ms == null ? '无数据' : fmtMs(k.avg_ms), k.avg_ms == null ? 'muted' : '')}
+      ${cell('累计中断', k.down_minutes == null ? '无数据' : k.down_minutes + ' 分钟', k.down_minutes == null ? 'muted' : k.down_minutes ? 'v-warn' : '')}
+      ${cell('告警事件', (k.alerts != null ? k.alerts : 0) + ' 条')}
+      ${cell('当前异常', (k.abnormal_now != null ? k.abnormal_now : 0) + ' 台', k.abnormal_now ? 'v-down' : 'v-ok')}
+      ${cell('监控设备', (k.with_data != null ? k.with_data : 0) + ' / ' + (k.monitored != null ? k.monitored : 0))}${k.observed_minutes != null ? cell('观测设备分钟', k.observed_minutes) : ''}${k.fault_episodes != null ? cell('故障次数', k.fault_episodes) : ''}
     </div>`;
   }
   // 报告正文 HTML（页面查看与导出共用）
   function reportDocHTML(rp) {
-    return `<div class="rpt-meta">${esc(rp.kind)} · ${esc(rp.range_label)}（${esc(rp.from)} ~ ${esc(rp.to)}） · 生成于 ${esc(rp.time)} · ${esc(rp.model)}</div>
+    const modelLabel = rp.model === 'deterministic' ? '程序确定性统计（无需 AI）' : rp.model;
+    return `<div class="rpt-meta">${esc(rp.kind)} · ${esc(rp.range_label)}（${esc(rp.from)} ~ ${esc(rp.to)}） · 生成于 ${esc(rp.time)} · ${esc(modelLabel)}</div>
       ${reportKPIs(rp.summary)}<div class="ai-md rpt-md">${mdLite(rp.markdown, { doc: true })}</div>`;
   }
   let reportCSS = null;
@@ -800,6 +824,9 @@
     if (reportCSS == null) {
       try { reportCSS = await (await fetch('style.css')).text(); } catch (e) { reportCSS = ''; }
     }
+    const foot = rp.model === 'deterministic'
+      ? '本报告由 netPing 程序确定性统计生成（无需 AI），仅统计激活期间的实际观测数据。'
+      : '本报告由 netPing AI 生成，正文结论由大模型基于监控数据撰写，附录数据由程序直接统计。';
     return `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${esc(rp.title)}</title>
@@ -811,7 +838,7 @@ body { padding: 32px 16px; }
 @media print { body { padding: 0; } .ai-chart, table, .rpt-kpis { break-inside: avoid; } h1, h2, h3 { break-after: avoid; } }
 </style></head>
 <body><article class="rpt-doc">${reportDocHTML(rp)}</article>
-<div class="rpt-foot">本报告由 netPing AI 生成，正文结论由大模型基于监控数据撰写，附录数据由程序直接统计。</div>
+<div class="rpt-foot">${foot}</div>
 </body></html>`;
   }
   function download(name, text, type) {
@@ -835,7 +862,7 @@ body { padding: 32px 16px; }
           <div class="help" style="margin-top:0">统计周期</div>
           <div class="chips" id="rRange" style="margin:0 0 10px">${REPORT_RANGES.map(([v, k, l]) => `<button class="chip" data-r="${v}">${k} · ${l}</button>`).join('')}</div>
           <label class="f"><span>额外要求（可选）</span><textarea id="rNote" rows="3" maxlength="500" placeholder="如：重点关注 3 楼摄像头；写给领导看，简洁一些；列出需要采购更换的设备"></textarea></label>
-          <div class="btns"><button class="btn accent" id="rGen">✦ 生成运维报告</button></div>
+          <div class="btns"><button class="btn accent" id="rGen">✦ AI 运维报告</button><button class="btn primary" id="rStats">生成统计报告（无需 AI）</button></div>
           <div class="help">AI 先读取程序统计的全网可用率、丢包、延迟、中断、告警和当前异常，必要时再查询设备历史，按「总体结论 → 关键指标 → 稳定性分析 → 告警与故障 → 风险隐患 → 处理建议」撰写报告，并附趋势和排行图表。报告末尾附程序直接统计的原始数据，便于核对。</div>
         </div></div>
         <div class="panel"><div class="ph">历史报告<span class="r muted" id="rCount"></span></div><div class="rpt-list" id="rList"></div></div>
@@ -850,10 +877,11 @@ body { padding: 32px 16px; }
       $('#rCount').textContent = list.length ? list.length + ' 份' : '';
       $('#rList').innerHTML = list.length ? list.map(r => {
         const k = r.summary || {};
+        const tag = r.model === 'deterministic' ? '<span class="badge ok">程序统计</span> ' : '';
         return `<div class="rpt-item${cur && cur.id === r.id ? ' on' : ''}" data-id="${esc(r.id)}">
-          <div class="t"><span class="badge unknown">${esc(r.kind)}</span> ${esc(r.title)}</div>
-          <div class="muted">${esc(r.time)} · 可用率 ${k.availability_pct != null ? k.availability_pct.toFixed(2) + '%' : '-'} · 告警 ${k.alerts != null ? k.alerts : '-'}</div></div>`;
-      }).join('') : '<div class="help" style="padding:12px;margin:0">还没有报告。选择周期后点「生成运维报告」。</div>';
+          <div class="t"><span class="badge unknown">${esc(r.kind)}</span> ${tag}${esc(r.title)}</div>
+          <div class="muted">${esc(r.time)} · 可用率 ${k.availability_pct != null ? k.availability_pct.toFixed(2) + '%' : '无数据'} · 告警 ${k.alerts != null ? k.alerts : '-'}</div></div>`;
+      }).join('') : '<div class="help" style="padding:12px;margin:0">还没有报告。选择周期后可点「生成统计报告（无需 AI）」或「✦ AI 运维报告」。</div>';
       $$('#rList .rpt-item').forEach(el => el.onclick = () => { if (!busy) show(el.dataset.id); });
     }
     function drawActs() {
@@ -866,7 +894,12 @@ body { padding: 32px 16px; }
         <button class="btn small" id="rCopy">复制原文</button>
         <button class="btn small danger" id="rDel">删除</button>`;
       const base = 'netPing-运维报告-' + cur.id;
-      $('#rMd').onclick = () => { location.href = 'api/ai/reports/' + encodeURIComponent(cur.id) + '.md'; };
+      $('#rMd').onclick = async () => {
+        try {
+          const md = await api('GET', 'api/ai/reports/' + encodeURIComponent(cur.id) + '.md');
+          download(base + '.md', md, 'text/markdown;charset=utf-8');
+        } catch (e) { toast(errMsg(e), true); }
+      };
       $('#rHtml').onclick = async () => download(base + '.html', await reportStandalone(cur), 'text/html;charset=utf-8');
       $('#rPdf').onclick = async () => {
         const html = await reportStandalone(cur);
@@ -908,7 +941,7 @@ body { padding: 32px 16px; }
         v.scrollTop = 0;
       } else {
         $('#rTitle').textContent = '运维报告';
-        v.innerHTML = `<div class="ai-empty"><b>AI 运维报告</b><br>选择日报、周报或月报，AI 会结合监控统计、告警和历史曲线撰写一份完整的运维报告。<br>生成后可下载 Markdown、导出 HTML，或打印为 PDF。</div>`;
+        v.innerHTML = `<div class="ai-empty"><b>网络健康与运维报告</b><br>选择日报、周报或月报：<br>1. <b>生成统计报告（无需 AI）</b>：程序按当前激活机房实际观测样本直接汇总，无样本时明确标注“无数据”。<br>2. <b>✦ AI 运维报告</b>：结合监控统计、告警和历史曲线撰写分析报告与图表。<br>生成后可下载 Markdown、导出 HTML，或打印为 PDF。</div>`;
       }
       drawActs();
     }
@@ -922,7 +955,7 @@ body { padding: 32px 16px; }
     }
     async function generate() {
       if (busy) return;
-      if (!settings || !settings.ready) { toast('请先在「AI 诊断」页设置 API Key 并启用', true); return; }
+      if (!settings || !settings.ready) { toast('请先在「AI 诊断」页设置 API Key 并启用，或点「生成统计报告（无需 AI）」', true); return; }
       const ctl = new AbortController();
       busy = ctl;
       live = { range: rg, content: '', tools: [], status: '正在连接…', stats: null, error: '' };
@@ -957,6 +990,18 @@ body { padding: 32px 16px; }
       } else { live.status = ''; drawView(); }
     }
     $('#rGen').onclick = generate;
+    $('#rStats').onclick = async () => {
+      if (busy) return;
+      const ctl = new AbortController(); busy = ctl;
+      $('#rStats').disabled = true; $('#rGen').disabled = true;
+      try {
+        const got = await api('POST', 'api/health-report', { range: rg }, { signal: ctl.signal });
+        live = null; cur = got; list = [got].concat(list.filter(r => r.id !== got.id));
+        sessionStorage.setItem('np_report_cur', got.id); drawList();
+        toast('统计报告已保存；仅统计激活期间的实际观测');
+      } catch (e) { if (e.name !== 'AbortError') toast(errMsg(e), true); }
+      finally { busy = null; if ($('#rStats')) { $('#rStats').disabled = false; $('#rGen').disabled = false; drawView(); } }
+    };
 
     drawView(); drawList();
     api('GET', 'api/ai/settings').then(a => {
@@ -1241,7 +1286,7 @@ body { padding: 32px 16px; }
       $('#optStop').onclick = () => ctl.abort();
       let result = null, meta = '';
       try {
-        const r = await fetch('api/ai/optimize', { method: 'POST', signal: ctl.signal, headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        const r = await fetch('api/ai/optimize', { method: 'POST', signal: ctl.signal, headers: { 'Content-Type': 'application/json', ...(S.activeProfile ? { 'X-NetPing-Profile': S.activeProfile } : {}) }, body: '{}' });
         if (!r.ok) {
           const d = await r.json().catch(() => ({}));
           if (r.status === 401 && d.login_required) { toLogin(); return; }
@@ -1736,12 +1781,12 @@ body { padding: 32px 16px; }
         <button class="btn small" id="bulkOn" title="对当前筛选出的所有可监控设备开启告警">筛选结果开启告警</button>
         <button class="btn small" id="bulkOff">筛选结果关闭告警</button>
       </div>
-      <table class="grid"><thead><tr>
+      <div class="table-wrap"><table class="grid"><thead><tr>
         <th data-k="state">状态</th><th data-k="ip">IP</th><th data-k="vendor">名称 / 厂商</th><th data-k="loc">接线位置</th>
         <th data-k="last" class="num">当前</th><th data-k="avg1" class="num">1m 平均</th><th data-k="jit" class="num">抖动</th>
         <th data-k="l1" class="num">1m 丢包</th><th data-k="l5" class="num">5m 丢包</th><th data-k="l60" class="num">1h 丢包</th>
         <th>最近 60 次</th><th data-k="since" class="num">状态持续</th><th data-k="alert" title="是否推送告警通知">告警</th><th title="上锁后不参与一键清理">上锁保护</th>
-      </tr></thead><tbody id="lbody"></tbody></table>
+      </tr></thead><tbody id="lbody"></tbody></table></div>
       <dialog id="lCleanupDialog" class="cleanup-dialog">
         <div class="ph">清理无效设备</div>
         <div class="pb">
@@ -2065,23 +2110,42 @@ body { padding: 32px 16px; }
   function alertsPage(app) {
     let timer = 0;
     app.innerHTML = `<div class="page pad">
-      <div class="toolbar"><b>告警记录</b><span class="muted">最近 300 条；通知渠道在「设置」中配置</span>
+      <div class="toolbar"><b>告警记录</b><span class="muted">当前机房最近 300 条；通知渠道在「设置」中配置</span>
         <span style="margin-left:auto" id="aState"></span></div>
-      <table class="grid"><thead><tr><th>时间</th><th>类型</th><th>IP</th><th>名称</th><th>位置</th><th>说明</th><th>发送</th></tr></thead><tbody id="abody"></tbody></table>
+      <div class="table-wrap"><table class="grid"><thead><tr><th>时间</th><th>类型</th><th>IP</th><th>名称</th><th>位置</th><th>说明</th><th>发送</th></tr></thead><tbody id="abody"></tbody></table></div>
     </div>`;
+    function rootCauseHint(id) {
+      if (!id) return '';
+      const hit = findTarget(id);
+      const label = hit ? [hit.obj.name || hit.obj.id, hit.obj.ip].filter(Boolean).join(' · ') : id;
+      return `<div class="help">疑似上游故障：<a href="#/node/${encodeURIComponent(id)}" class="root-cause-link" data-root-cause="${esc(id)}">${esc(label)}</a>${hit && hit.obj.id ? ` <span class="mono muted">(${esc(id)})</span>` : ''}。依据拓扑上游连接与当前离线状态关联，仅作辅助定位提示，不代表已确认物理故障。</div>`;
+    }
+    function sendStatusHTML(e) {
+      if (e.suppressed === 'maintenance') {
+        return e.maintenance_id === 'invalid-maintenance-file'
+          ? '<span class="v-warn" title="维护窗口文件异常，已启用保护性静默">维护数据异常 · 保护性静默</span>'
+          : `<span class="muted" title="${esc(e.maintenance_id || '')}">维护窗口内 · 已抑制通知</span>`;
+      }
+      if (e.sent) return '<span class="v-ok">已发送</span>';
+      if (e.error) return `<span class="v-down" title="${esc(e.error)}">失败</span>`;
+      return '<span class="muted">未发送</span>';
+    }
     async function load() {
       try {
         const list = await api('GET', 'api/alerts');
         $('#abody').innerHTML = list.length ? list.map(e => {
           const [t, c] = EVENT_TXT[e.type] || [e.type, 'unknown'];
           return `<tr data-id="${esc(e.target_id || '')}"><td class="mono">${esc(Charts.fmtFull(new Date(e.time).getTime()))}</td><td><span class="badge ${c}">${t}</span></td>
-            <td class="mono">${esc(e.ip || '')}</td><td>${esc(e.name || '')}</td><td>${esc(e.location || '')}</td><td class="wrap">${esc(e.detail || '')}</td>
-            <td>${e.sent ? '<span class="v-ok">已发送</span>' : e.error ? `<span class="v-down" title="${esc(e.error)}">失败</span>` : '<span class="muted">未发送</span>'}</td></tr>`;
+            <td class="mono">${esc(e.ip || '')}</td><td>${esc(e.name || '')}</td><td>${esc(e.location || '')}</td><td class="wrap">${esc(e.detail || '')}${rootCauseHint(e.root_cause_id)}</td>
+            <td>${sendStatusHTML(e)}</td></tr>`;
         }).join('') : '<tr><td colspan="7" class="empty">暂无告警记录</td></tr>';
       } catch (e) { toast(errMsg(e), true); }
       timer = setTimeout(load, 10000);
     }
-    $('#abody').onclick = e => { const tr = e.target.closest('tr[data-id]'); if (tr && tr.dataset.id) location.hash = '#/node/' + encodeURIComponent(tr.dataset.id); };
+    $('#abody').onclick = e => {
+      if (e.target.closest('a[data-root-cause]')) { e.stopPropagation(); return; }
+      const tr = e.target.closest('tr[data-id]'); if (tr && tr.dataset.id) location.hash = '#/node/' + encodeURIComponent(tr.dataset.id);
+    };
     api('GET', 'api/config').then(c => {
       const on = S.topo ? S.topo.nodes.filter(n => n.monitor && n.monitor.alert).length + S.topo.switches.filter(x => x.monitor && x.monitor.alert).length : 0;
       $('#aState').innerHTML = (c.alert.enabled ? '<span class="badge ok">告警通知已启用</span>' : '<span class="badge down">告警通知未启用</span> <a href="#/settings">去设置</a>') +
@@ -2096,11 +2160,30 @@ body { padding: 32px 16px; }
   function settingsPage(app) {
     app.innerHTML = `<div class="page pad"><div class="settings">
       <div>
-        <div class="panel"><div class="ph">告警通知渠道</div><div class="pb"><form id="af"></form></div></div>
-        <div class="panel"><div class="ph">监控时段<span class="r" id="schNow"></span></div><div class="pb"><form id="schf"></form></div></div>
-        <div class="panel"><div class="ph">默认 Ping 参数</div><div class="pb"><form id="pf"></form></div></div>
-        <div class="panel"><div class="ph">机房信息</div><div class="pb"><form id="sitef"></form></div></div>
-        <div class="panel"><div class="ph">登录密码<span class="r"><button class="btn small" id="logout">退出登录</button></span></div><div class="pb"><form id="pwf">
+        <div class="panel"><div class="ph">告警通知渠道 · 当前机房</div><div class="pb"><form id="af"></form></div></div>
+        <div class="panel"><div class="ph">监控时段 · 当前机房<span class="r" id="schNow"></span></div><div class="pb"><form id="schf"></form></div></div>
+        <div class="panel"><div class="ph">默认 Ping 参数 · 当前机房</div><div class="pb"><form id="pf"></form></div></div>
+        <div class="panel"><div class="ph">机房配置 <span class="r" id="roomActiveHint">同时仅激活一套</span></div><div class="pb">
+          <div id="roomList">正在加载…</div><div id="roomInspect" aria-live="polite"></div>
+          <form id="roomCreate"><label class="f"><span>新配置名称</span><input name="name" required maxlength="80" placeholder="例如：总部机房"></label>
+          <div class="checks"><label><input name="copy" type="checkbox">复制当前机房配置、设备和拓扑</label></div>
+          <div class="btns"><button class="btn" type="submit">保存为新配置</button></div></form>
+          <div class="help">保存新配置不会自动激活；仅当前激活机房执行 ping 探测、扫描、SNMP 与告警。通知渠道、扫描任务、SNMP、监控时段、Ping 参数、维护窗口和历史数据均按机房隔离；登录密码、历史保留天数、MCP 与 AI 连接为全局设置。</div>
+        </div></div>
+        <div class="panel"><div class="ph">维护窗口 · 当前机房</div><div class="pb">
+          <div id="maintenanceErrorBanner" class="banner hidden" style="margin-bottom:10px"></div>
+          <form id="maintenanceForm"><label class="f"><span>维护范围</span><select name="scope"><option value="site">整机房</option><option value="devices">指定设备</option></select></label>
+          <label class="f hidden" id="maintenanceTargetsField"><span>指定设备（可多选）</span><select name="targets" multiple size="5"></select></label>
+          <div class="row2">
+            <label class="f"><span>开始时间（本地时间）</span><input name="start" type="datetime-local" required></label>
+            <label class="f"><span>结束时间（本地时间）</span><input name="end" type="datetime-local" required></label>
+          </div>
+          <label class="f"><span>维护说明</span><input name="reason" maxlength="500" placeholder="例如：核心交换机割接升级" required></label>
+          <div class="btns"><button class="btn primary" type="submit">保存维护窗口</button></div></form>
+          <p class="help">维护期间继续探测并记录历史，抑制相关告警通知；到期或取消后自动恢复原告警规则。仅激活机房参与监控。</p><div id="maintenanceList" aria-live="polite">正在加载…</div>
+        </div></div>
+        <div class="panel"><div class="ph">机房信息 · 当前机房</div><div class="pb"><form id="sitef"></form></div></div>
+        <div class="panel"><div class="ph">全局 · 登录密码<span class="r"><button class="btn small" id="logout">退出登录</button></span></div><div class="pb"><form id="pwf">
           <div class="row3">
             <label class="f"><span>当前密码</span><input type="password" name="old" autocomplete="current-password" required></label>
             <label class="f"><span>新密码（至少 6 位）</span><input type="password" name="p1" autocomplete="new-password" minlength="6" required></label>
@@ -2112,7 +2195,7 @@ body { padding: 32px 16px; }
         <div class="panel"><div class="ph">关于</div><div class="pb" id="about"></div></div>
       </div>
       <div>
-        <div class="panel"><div class="ph">拓扑文件 topology.yaml<span class="r btns" style="margin:0">
+        <div class="panel"><div class="ph">拓扑文件 topology.yaml · 当前机房<span class="r btns" style="margin:0">
           <button class="btn small" id="yLoad">重新读取</button>
           <a class="btn small" href="api/topology/yaml?download=1">下载</a>
           <button class="btn small" id="yUpload">导入文件…</button><input type="file" id="yFile" accept=".yaml,.yml" class="hidden">
@@ -2125,6 +2208,364 @@ body { padding: 32px 16px; }
             <div class="problems" id="yProb"></div>
           </div></div>
       </div></div></div>`;
+
+    const pad2 = n => String(n).padStart(2, '0');
+    function toLocalInput(d) {
+      return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+    }
+    function initMaintenanceDefaults() {
+      const f = $('#maintenanceForm');
+      if (!f) return;
+      const now = new Date();
+      now.setSeconds(0, 0);
+      const end = new Date(now.getTime() + 2 * 3600 * 1000);
+      if (!f.elements.start.value) f.elements.start.value = toLocalInput(now);
+      if (!f.elements.end.value) f.elements.end.value = toLocalInput(end);
+      syncMaintenanceScope();
+    }
+    function syncMaintenanceScope() {
+      const f = $('#maintenanceForm');
+      if (!f) return;
+      const isDevices = f.elements.scope.value === 'devices';
+      $('#maintenanceTargetsField').classList.toggle('hidden', !isDevices);
+      f.elements.targets.disabled = !isDevices;
+    }
+    function renderMaintenanceTargets() {
+      const sel = $('#maintenanceForm') && $('#maintenanceForm').elements.targets;
+      if (!sel) return;
+      const prev = new Set(Array.from(sel.selectedOptions).map(o => o.value));
+      const topo = S.topo || { switches: [], nodes: [] };
+      const all = [...(topo.switches || []), ...(topo.nodes || [])];
+      sel.innerHTML = all.map(n => `<option value="${esc(n.id)}"${prev.has(n.id) ? ' selected' : ''}>${esc(n.name || n.id)}${n.ip ? ' · ' + esc(n.ip) : ''}</option>`).join('') || '<option disabled>当前机房暂无设备</option>';
+    }
+    function fmtMaintTime(v) {
+      const ms = Date.parse(v);
+      return Number.isFinite(ms) ? Charts.fmtFull(ms) : String(v || '');
+    }
+    function fmtTargetList(ids) {
+      return (ids || []).map(id => {
+        const hit = findTarget(id);
+        return hit ? `${hit.obj.name || hit.obj.id}${hit.obj.ip ? ' (' + hit.obj.ip + ')' : ''}` : id;
+      }).join('、') || '指定设备';
+    }
+    $('#maintenanceForm').elements.scope.onchange = syncMaintenanceScope;
+    renderMaintenanceTargets();
+    initMaintenanceDefaults();
+
+    async function loadMaintenance() {
+      const rows = await api('GET', 'api/maintenance');
+      if (!$('#maintenanceList')) return;
+      const labels = { active: ['维护中', 'slow'], scheduled: ['待开始', 'unknown'], expired: ['已到期', ''], cancelled: ['已取消', ''], error: ['维护数据异常', 'down'] };
+      const hasError = rows.some(w => w.status === 'error');
+      const errBanner = $('#maintenanceErrorBanner');
+      if (errBanner) {
+        errBanner.classList.toggle('hidden', !hasError);
+        if (hasError) {
+          const errRow = rows.find(w => w.status === 'error');
+          errBanner.textContent = (errRow && errRow.reason) || '维护窗口文件损坏，通知已保护性静默，请修复文件后重新加载。';
+        }
+      }
+      const submitBtn = $('#maintenanceForm button[type=submit]');
+      if (submitBtn) submitBtn.disabled = hasError;
+      $('#maintenanceList').innerHTML = rows.map(w => {
+        const [stLabel, stCls] = labels[w.status] || [w.status, 'unknown'];
+        const scopeText = w.status === 'error' ? '损坏保护' : w.scope === 'site' ? '整机房' : fmtTargetList(w.target_ids);
+        const timeHTML = w.status === 'error' ? '' : `<div class="mono muted" style="font-size:12px">${esc(fmtMaintTime(w.start))} → ${esc(fmtMaintTime(w.end))}</div>`;
+        return `<div class="room-version"><div><div><span class="badge ${stCls}">${esc(stLabel)}</span> <b>${esc(scopeText)}</b></div>${timeHTML}<div class="help">${esc(w.reason || '')}</div>${w.status === 'error' ? '<p class="v-down" style="margin:4px 0 0">维护文件无法读取，告警通知已进入保护性静默。请修复服务器维护数据后重试。</p>' : ''}</div>${['active', 'scheduled'].includes(w.status) ? `<button class="btn small" data-cancel-maintenance="${esc(w.id)}">取消维护</button>` : ''}</div>`;
+      }).join('') || '<p class="help">暂无维护窗口</p>';
+    }
+    $('#maintenanceList').onclick = async ev => {
+      const b = ev.target.closest('[data-cancel-maintenance]'); if (!b || !confirm('取消维护窗口？受影响目标将按监控时段和告警规则恢复通知。')) return;
+      b.disabled = true;
+      try { await api('DELETE', 'api/maintenance/' + encodeURIComponent(b.dataset.cancelMaintenance)); await loadMaintenance(); toast('维护已取消，已恢复原告警规则'); }
+      catch (e) { toast(errMsg(e), true); b.disabled = false; }
+    };
+    $('#maintenanceForm').onsubmit = async ev => {
+      ev.preventDefault(); const f = ev.target;
+      const start = new Date(f.elements.start.value), end = new Date(f.elements.end.value);
+      if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) { toast('请填写有效的起止时间', true); return; }
+      if (!(end > start)) { toast('结束时间必须晚于开始时间', true); return; }
+      if (!(end > new Date())) { toast('结束时间必须晚于当前时间', true); return; }
+      const ids = Array.from(f.elements.targets.selectedOptions).map(o => o.value).filter(Boolean);
+      if (f.elements.scope.value === 'devices' && !ids.length) { toast('请选择至少一个维护设备', true); return; }
+      if (!confirm('保存维护窗口？窗口内目标继续探测并记录历史，通知将被抑制，到期后自动恢复告警规则。')) return;
+      const b = f.querySelector('button[type=submit]'); b.disabled = true;
+      try {
+        await api('POST', 'api/maintenance', { scope: f.elements.scope.value, target_ids: f.elements.scope.value === 'devices' ? ids : [], start: start.toISOString(), end: end.toISOString(), reason: f.elements.reason.value.trim() });
+        f.reset();
+        initMaintenanceDefaults();
+        await loadMaintenance();
+        toast('维护窗口已保存');
+      } catch (e) { toast(errMsg(e), true); } finally { b.disabled = false; }
+    };
+    loadMaintenance().catch(e => { if ($('#maintenanceList')) $('#maintenanceList').textContent = '读取失败：' + errMsg(e); });
+
+    let rooms = [];
+    let roomBusy = false;
+    async function loadRooms() {
+      rooms = await api('GET', 'api/profiles');
+      if (!$('#roomList')) return;
+      const activeRoom = rooms.find(r => r.active);
+      if ($('#roomActiveHint')) {
+        $('#roomActiveHint').textContent = activeRoom ? `当前激活：${activeRoom.name}` : '同时仅激活一套';
+      }
+      $('#roomList').innerHTML = rooms.map(p => `<div class="room-card${p.active ? ' active' : ''}">
+        <div class="room-card-head"><b>${esc(p.name)}</b> ${p.active ? '<span class="badge ok">已激活</span>' : '<span class="badge">未激活</span>'}</div>
+        <div class="help">${p.switches} 台交换机 · ${p.nodes} 个节点${p.observation_minutes ? ` · 已观测 ${p.observation_minutes} 分钟` : ''}${p.site_name ? ' · ' + esc(p.site_name) : ''}</div>
+        <div class="btns">${p.active ? '' : `<button class="btn small primary" data-room="${esc(p.id)}" data-action="activate">激活预览</button>`}
+        <button class="btn small" data-room="${esc(p.id)}" data-action="settings">机房设置</button>
+        <button class="btn small" data-room="${esc(p.id)}" data-action="versions">配置版本</button>
+        <button class="btn small" data-room="${esc(p.id)}" data-action="rename">改名</button>
+        ${p.active ? '' : `<button class="btn small danger" data-room="${esc(p.id)}" data-action="delete">删除</button>`}</div></div>`).join('') || '<p class="help">暂无机房配置</p>';
+    }
+    $('#roomCreate').onsubmit = async ev => {
+      ev.preventDefault(); if (roomBusy) return;
+      const f = ev.target;
+      const btn = f.querySelector('button[type=submit]');
+      roomBusy = true; if (btn) btn.disabled = true;
+      try {
+        await api('POST', 'api/profiles', { name: f.elements.name.value.trim(), copy_current: f.elements.copy.checked });
+        f.reset(); await loadRooms(); toast('机房配置已保存（未激活，当前监控未切换）');
+      } catch (e) { toast(errMsg(e), true); } finally { roomBusy = false; if (btn) btn.disabled = false; }
+    };
+    $('#roomList').onclick = async ev => {
+      const b = ev.target.closest('[data-room]'); if (!b || roomBusy) return;
+      const p = rooms.find(p => p.id === b.dataset.room); if (!p) return;
+      const action = b.dataset.action;
+      let name;
+      if (action === 'rename') { name = prompt('配置名称', p.name); if (name === null) return; name = name.trim(); if (!name) return; }
+      if (action === 'delete' && !confirm(`删除未激活配置「${p.name}」？此操作会移除该机房的拓扑、独立配置与历史数据。`)) return;
+
+      roomBusy = true; b.disabled = true;
+      try {
+        if (action === 'versions') { await showVersions(p); return; }
+        if (action === 'activate') { await showPreview(p); return; }
+        if (action === 'settings') { await showProfileSettings(p); return; }
+        await api(action === 'delete' ? 'DELETE' : action === 'rename' ? 'PUT' : 'POST', 'api/profiles/' + encodeURIComponent(p.id), { action, name });
+        if (action === 'activate') { resetProfileView('#/settings'); return; }
+        if (action === 'delete' && $('#roomInspect')) $('#roomInspect').innerHTML = '';
+        await loadRooms(); toast(action === 'delete' ? '未激活机房已删除' : '机房名称已更新');
+      } catch (e) { toast(errMsg(e), true); } finally { roomBusy = false; b.disabled = false; }
+    };
+    function bindInspectClose() {
+      const closeBtn = $('#roomInspectClose');
+      if (closeBtn) closeBtn.onclick = () => { $('#roomInspect').innerHTML = ''; };
+    }
+    function renderPreviewExtra(d) {
+      const m = d.summary || {};
+      const blocks = [];
+      const metaParts = [];
+      if (m.site_name) metaParts.push('站点：' + esc(m.site_name));
+      if (m.subnet) metaParts.push('网段：' + esc(m.subnet));
+      if (m.gateway) metaParts.push('网关：' + esc(m.gateway));
+      if (m.links != null) metaParts.push('链路 ' + m.links + ' 条');
+      if (m.discovery_jobs != null) metaParts.push('扫描任务 ' + m.discovery_jobs + ' 个');
+      if (m.locate_switches != null) metaParts.push('SNMP 交换机 ' + m.locate_switches + ' 台');
+      if (m.alert_enabled != null) metaParts.push('告警推送：' + (m.alert_enabled ? '已开启' : '未开启'));
+      if (m.schedule_enabled != null) metaParts.push('监控时段：' + (m.schedule_enabled ? (m.in_schedule_now === false ? '已开启（当前在时段外）' : '已开启') : '全天候'));
+      if (metaParts.length) blocks.push(`<div class="help" style="margin:6px 0">${metaParts.join(' · ')}</div>`);
+
+      if (Array.isArray(d.scan_ranges)) {
+        blocks.push(`<div class="room-kv"><span class="k">扫描范围</span><span>${d.scan_ranges.length ? d.scan_ranges.map(x => `<code>${esc(x)}</code>`).join(' ') : '<span class="muted">未配置扫描范围</span>'}</span></div>`);
+      } else {
+        blocks.push(`<div class="room-kv"><span class="k">扫描范围</span><span>${m.subnet ? `<code>${esc(m.subnet)}</code> <span class="muted">（机房网段；完整扫描任务范围待后端返回）</span>` : '<span class="muted">未设置（待后端返回扫描范围）</span>'}</span></div>`);
+      }
+
+      if (Array.isArray(d.notification_destinations)) {
+        const destHtml = d.notification_destinations.length
+          ? d.notification_destinations.map(x => `<span class="badge unknown">${esc(x.channel || '渠道')}</span> <code class="mono">${esc(x.destination || '已脱敏')}</code>`).join('<br>')
+          : '<span class="muted">未配置通知渠道</span>';
+        blocks.push(`<div class="room-kv"><span class="k">通知去向（已脱敏）</span><span>${destHtml}</span></div>`);
+      } else {
+        blocks.push('<div class="room-kv"><span class="k">通知去向（已脱敏）</span><span class="muted">待后端返回脱敏去向</span></div>');
+      }
+
+      if (Array.isArray(d.connectivity)) {
+        const connLabel = { reachable: ['可达', 'ok'], unreachable: ['不可达', 'down'], unknown: ['未知', 'unknown'] };
+        const connHtml = d.connectivity.length
+          ? d.connectivity.map(c => {
+            const [lbl, cls] = connLabel[c.status] || [c.status || '未知', 'unknown'];
+            return `<div><span class="badge ${cls}">${esc(lbl)}</span> <span class="mono">${esc(c.ip || '')}</span>${c.detail ? ` <span class="muted">${esc(c.detail)}</span>` : ''}</div>`;
+          }).join('')
+          : '<span class="muted">无待检查目标地址</span>';
+        blocks.push(`<div class="room-kv"><span class="k">连通性检查（仅供参考）</span><div>${connHtml}</div></div>`);
+      } else {
+        blocks.push('<div class="room-kv"><span class="k">连通性检查（仅供参考）</span><span class="muted">待后端返回连通性结果（不可达不限制切换）</span></div>');
+      }
+      $('#roomPreviewExtra').innerHTML = blocks.join('');
+    }
+    async function showPreview(p) {
+      $('#roomInspect').innerHTML = `<div class="room-preview"><p class="muted">正在加载「${esc(p.name)}」激活预览与连通性检查…</p></div>`;
+      let d;
+      try {
+        d = await api('GET', 'api/profiles/' + encodeURIComponent(p.id) + '/preview');
+      } catch (e) {
+        $('#roomInspect').innerHTML = `<div class="room-preview"><div class="room-preview-head"><b>激活预览 · ${esc(p.name)}</b><button class="btn small" id="roomInspectClose">关闭</button></div><p class="v-down">预览读取失败：${esc(errMsg(e))}</p></div>`;
+        bindInspectClose();
+        throw e;
+      }
+      const m = d.summary || {};
+      const errs = (d.errors || []).map(x => `<div class="v-down">• ${esc(x)}</div>`).join('');
+      const warns = (d.warnings || []).map(x => `<div class="v-warn">• ${esc(x)}</div>`).join('');
+      $('#roomInspect').innerHTML = `<div class="room-preview">
+        <div class="room-preview-head"><h3>激活预览 · ${esc(p.name)}</h3><button class="btn small" id="roomInspectClose">关闭</button></div>
+        <p style="margin:6px 0"><b>${m.switches || 0}</b> 台交换机 · <b>${m.nodes || 0}</b> 个节点 · <b>${m.monitored || 0}</b> 个监控目标</p>
+        <div id="roomPreviewExtra"></div>
+        ${errs ? `<div style="margin-top:8px">${errs}</div>` : ''}
+        ${warns ? `<div style="margin-top:8px">${warns}</div>` : ''}
+        ${d.busy ? `<p class="v-warn" style="margin:8px 0">${esc(d.busy_reason || '后台任务正在运行')}</p>` : ''}
+        <p class="help">激活切换后，当前机房将停止监控，页面中未保存编辑将丢失。连通性检查仅作参考提示，不限制用户切换到当前不可达的机房。</p>
+        <div class="btns"><button class="btn primary" id="roomConfirm" ${!d.can_activate || d.already_active ? 'disabled' : ''}>${d.already_active ? '当前已激活' : '确认激活'}</button></div></div>`;
+      bindInspectClose();
+      renderPreviewExtra(d);
+      $('#roomConfirm').onclick = async ev => {
+        if (!confirm(`确认激活「${p.name}」并停止当前机房监控？`)) return;
+        ev.target.disabled = true;
+        try { await api('POST', 'api/profiles/' + encodeURIComponent(p.id), { action: 'activate' }); resetProfileView('#/settings'); }
+        catch (e) { toast(errMsg(e), true); ev.target.disabled = false; }
+      };
+    }
+    async function showVersions(p) {
+      const base = 'api/profiles/' + encodeURIComponent(p.id) + '/versions';
+      $('#roomInspect').innerHTML = `<div class="room-preview"><p class="muted">正在加载「${esc(p.name)}」配置版本…</p></div>`;
+      let versions;
+      try {
+        versions = await api('GET', base);
+      } catch (e) {
+        $('#roomInspect').innerHTML = `<div class="room-preview"><div class="room-preview-head"><b>配置版本 · ${esc(p.name)}</b><button class="btn small" id="roomInspectClose">关闭</button></div><p class="v-down">版本列表读取失败：${esc(errMsg(e))}</p></div>`;
+        bindInspectClose();
+        throw e;
+      }
+      $('#roomInspect').innerHTML = `<div class="room-preview">
+        <div class="room-preview-head"><h3>配置版本 · ${esc(p.name)}</h3><div class="btns" style="margin:0"><button class="btn small primary" id="roomSnapshot">保存当前版本</button><button class="btn small" id="roomInspectClose">关闭</button></div></div>
+        <div id="roomVersions"></div>
+        <div id="roomVersionDetail"></div></div>`;
+      bindInspectClose();
+      const reasonTxt = { manual: '手动保存', pre_activate: '激活前自动备份', pre_rollback: '回滚前自动备份', topo_edit: '拓扑变更', settings_edit: '设置变更' };
+      $('#roomVersions').innerHTML = (versions || []).map(v => {
+        const ts = v.created_at || v.time || '';
+        const formatted = Number.isFinite(Date.parse(ts)) ? Charts.fmtFull(Date.parse(ts)) : ts;
+        const meta = [
+          v.reason ? esc(reasonTxt[v.reason] || v.reason) : '',
+          v.site_name ? esc(v.site_name) : '',
+          v.switches != null ? `${v.switches} 交换机` : '',
+          v.nodes != null ? `${v.nodes} 节点` : '',
+          v.size_bytes ? `${(v.size_bytes / 1024).toFixed(1)} KB` : '',
+        ].filter(Boolean).join(' · ');
+        return `<div class="room-version">
+          <div>
+            <div><span class="mono"><b>${esc(v.id)}</b></span> · <span>${esc(formatted)}</span>${v.note ? ` · ${esc(v.note)}` : ''}</div>
+            ${meta ? `<div class="help" style="margin:2px 0 0">${meta}</div>` : ''}
+          </div>
+          <div class="btns" style="margin:0">
+            <button class="btn small" data-version-detail="${esc(v.id)}">查看</button>
+            <button class="btn small danger" data-version="${esc(v.id)}">恢复</button>
+          </div>
+        </div>`;
+      }).join('') || '<p class="help">暂无版本</p>';
+      $('#roomSnapshot').onclick = async () => {
+        const note = prompt('版本备注（可选）', '手动保存'); if (note === null) return;
+        try { await api('POST', base, { note }); await showVersions(p); toast('配置版本已保存'); } catch (e) { toast(errMsg(e), true); }
+      };
+      $('#roomVersions').onclick = async ev => {
+        const detailBtn = ev.target.closest('[data-version-detail]');
+        if (detailBtn) {
+          detailBtn.disabled = true;
+          try {
+            const vd = await api('GET', base + '/' + encodeURIComponent(detailBtn.dataset.versionDetail));
+            const meta = vd.meta || {};
+            const topo = vd.topology || {};
+            const st = vd.settings || {};
+            const ping = st.ping || {};
+            const al = st.alert || {};
+            const sch = st.schedule || {};
+            $('#roomVersionDetail').innerHTML = `<div class="room-version-detail">
+              <div><b>版本快照详情 · ${esc(meta.id || detailBtn.dataset.versionDetail)}</b></div>
+              <div class="help">站点：${esc((topo.site && topo.site.name) || meta.site_name || '-')} · ${(topo.switches || []).length} 台交换机 · ${(topo.nodes || []).length} 个节点 · ${(topo.links || []).length} 条链路</div>
+              <div class="help">Ping：间隔 ${ping.interval_ms || '-'}ms / 超时 ${ping.timeout_ms || '-'}ms · 告警推送：${al.enabled ? '开启' : '关闭'} · 监控时段：${sch.enabled ? '按时段' : '全天候'}</div>
+            </div>`;
+          } catch (e) { toast(errMsg(e), true); }
+          finally { detailBtn.disabled = false; }
+          return;
+        }
+        const b = ev.target.closest('[data-version]'); if (!b) return;
+        if (!confirm(`恢复「${p.name}」的此版本？将替换该机房的配置与拓扑（当前配置会先自动备份）。历史监控数据不回退。`)) return;
+        b.disabled = true;
+        try {
+          const res = await api('POST', base + '/' + encodeURIComponent(b.dataset.version) + '/rollback', {});
+          const backupTip = res && res.backup_version ? `（原配置已备份为 ${res.backup_version}）` : '';
+          if (p.active) { resetProfileView('#/settings'); }
+          else { await showVersions(p); await loadRooms(); toast(`版本已恢复${backupTip}，机房仍未激活`); }
+        } catch (e) { toast(errMsg(e), true); b.disabled = false; }
+      };
+    }
+    async function showProfileSettings(p) {
+      $('#roomInspect').innerHTML = `<div class="room-preview"><p class="muted">正在读取「${esc(p.name)}」独立机房设置…</p></div>`;
+      let res;
+      try {
+        res = await api('GET', 'api/profiles/' + encodeURIComponent(p.id) + '/settings');
+      } catch (e) {
+        $('#roomInspect').innerHTML = `<div class="room-preview"><div class="room-preview-head"><b>机房独立设置 · ${esc(p.name)}</b><button class="btn small" id="roomInspectClose">关闭</button></div><p class="v-down">读取失败：${esc(errMsg(e))}</p></div>`;
+        bindInspectClose();
+        throw e;
+      }
+      const st = res.settings || {};
+      const ping = st.ping || {};
+      const al = st.alert || {};
+      const sch = st.schedule || {};
+      const disc = st.discovery || {};
+      const loc = st.locate || {};
+      const maskedChannels = [
+        ['企业微信', al.webhook_url],
+        ['钉钉', al.dingtalk_url],
+        ['飞书', al.feishu_url],
+        ['Slack', al.slack_url],
+        ['通用 Webhook', al.generic_webhook_url],
+      ].filter(([, v]) => !!v);
+      $('#roomInspect').innerHTML = `<div class="room-preview">
+        <div class="room-preview-head"><h3>机房独立设置 · ${esc(res.name || p.name)} ${res.active ? '<span class="badge ok">已激活</span>' : '<span class="badge">未激活</span>'}</h3><button class="btn small" id="roomInspectClose">关闭</button></div>
+        <p class="help">此表单仅修改该机房的隔离参数（密钥与 Webhook 地址已脱敏展示；如需修改当前激活机房的密钥或时段细节，请使用左侧对应面板）。</p>
+        <form id="roomSettingsForm">
+          <div class="checks" style="margin-bottom:8px">
+            <label><input type="checkbox" name="alert_enabled" ${al.enabled ? 'checked' : ''}> 启用告警推送</label>
+            <label><input type="checkbox" name="send_recovery" ${al.send_recovery ? 'checked' : ''}> 发送恢复通知</label>
+            <label><input type="checkbox" name="schedule_enabled" ${sch.enabled ? 'checked' : ''}> 按监控时段运行</label>
+            <label><input type="checkbox" name="discovery_enabled" ${disc.enabled ? 'checked' : ''}> 启用自动扫描</label>
+            <label><input type="checkbox" name="locate_enabled" ${loc.enabled ? 'checked' : ''}> 启用定时定位</label>
+          </div>
+          <label class="f"><span>告警消息标题</span><input type="text" name="site_title" value="${esc(al.site_title || '')}"></label>
+          <div class="row3">
+            ${num('interval_ms', 'Ping 间隔 ms', ping.interval_ms || 3000, 'min="200"')}
+            ${num('timeout_ms', 'Ping 超时 ms', ping.timeout_ms || 1000, 'min="100"')}
+            ${num('packet_size', '数据包字节', ping.packet_size != null ? ping.packet_size : 32, 'min="0"')}
+            ${num('latency_warn_ms', '延迟阈值 ms', ping.latency_warn_ms || 100, 'min="1"')}
+            ${num('loss_warn_pct', '丢包阈值 %', ping.loss_warn_pct || 20, 'min="1" max="100"')}
+            ${num('locate_interval_min', '定位间隔(分)', loc.interval_min || 10, 'min="2"')}
+          </div>
+          <div class="help">已配置通知渠道（脱敏）：${maskedChannels.length ? maskedChannels.map(([c, v]) => `${esc(c)}(<code>${esc(v)}</code>)`).join('、') : '未配置'}</div>
+          <div class="btns"><button class="btn primary" type="submit">保存机房设置</button></div>
+        </form>
+      </div>`;
+      bindInspectClose();
+      $('#roomSettingsForm').onsubmit = async ev => {
+        ev.preventDefault();
+        const f = ev.target, e = f.elements;
+        const next = JSON.parse(JSON.stringify(st));
+        next.alert = Object.assign({}, next.alert, { enabled: e.alert_enabled.checked, send_recovery: e.send_recovery.checked, site_title: e.site_title.value.trim() });
+        next.schedule = Object.assign({}, next.schedule, { enabled: e.schedule_enabled.checked });
+        next.discovery = Object.assign({}, next.discovery, { enabled: e.discovery_enabled.checked });
+        next.locate = Object.assign({}, next.locate, { enabled: e.locate_enabled.checked, interval_min: +e.locate_interval_min.value });
+        next.ping = Object.assign({}, next.ping, { interval_ms: +e.interval_ms.value, timeout_ms: +e.timeout_ms.value, packet_size: +e.packet_size.value, latency_warn_ms: +e.latency_warn_ms.value, loss_warn_pct: +e.loss_warn_pct.value });
+        const btn = f.querySelector('button[type=submit]'); btn.disabled = true;
+        try {
+          await api('PUT', 'api/profiles/' + encodeURIComponent(p.id) + '/settings', next);
+          toast(`机房「${p.name}」配置已保存${p.active ? '（当前机房已生效）' : '（未激活机房将在激活后生效）'}`);
+          if (p.active) await loadCfg();
+        } catch (err) { toast(errMsg(err), true); }
+        finally { btn.disabled = false; }
+      };
+    }
+    loadRooms().catch(e => { if ($('#roomList')) $('#roomList').textContent = errMsg(e); });
 
     let cfg = null;
     const num = (name, label, v, extra) => `<label class="f"><span>${label}</span><input type="number" name="${name}" value="${v}" ${extra || ''}></label>`;
@@ -2158,7 +2599,7 @@ body { padding: 32px 16px; }
       const p = cfg.ping;
       $('#pf').innerHTML = `<div class="row2">
           ${num('interval_ms', 'Ping 间隔 ms', p.interval_ms, 'min="200"')}${num('timeout_ms', '超时 ms', p.timeout_ms, 'min="100"')}
-          ${num('packet_size', '数据长度 字节', p.packet_size, 'min="0"')}${num('retention_days', '历史保留天数', cfg.retention_days, 'min="1"')}
+          ${num('packet_size', '数据长度 字节', p.packet_size, 'min="0"')}${num('retention_days', '历史保留天数（全局）', cfg.retention_days, 'min="1"')}
           ${num('latency_warn_ms', '延迟阈值 ms（1m 平均）', p.latency_warn_ms, 'min="1"')}${num('loss_warn_pct', '丢包阈值 %（1m）', p.loss_warn_pct, 'min="1" max="100"')}
         </div><div class="btns"><button class="btn primary" type="submit">保存</button></div>
         <div class="help">节点可在拓扑页单独覆盖这些参数。监听地址请直接编辑程序目录下的 config.yaml，重启后生效。</div>`;
@@ -2315,12 +2756,12 @@ body { padding: 32px 16px; }
       ev.target.value = '';
     };
     api('GET', 'api/meta').then(m => {
-      $('#about').innerHTML = `<div class="mono" style="font-size:12px;line-height:1.8">版本 ${esc(m.version)}<br>数据目录 ${esc(m.base_dir)}<br>拓扑文件 ${esc(m.topo_file)}<br>
+      $('#about').innerHTML = `<div class="mono" style="font-size:12px;line-height:1.8">版本 ${esc(m.version)}${m.active_profile ? `<br>激活机房 ${esc(m.active_profile)}` : ''}<br>数据目录 ${esc(m.base_dir)}<br>拓扑文件 ${esc(m.topo_file)}<br>
         启动于 ${esc(Charts.fmtFull(m.started))}</div><div class="help">字段说明：docs/topology-fields.md；JSON Schema：schema/topology.schema.json</div>`;
     }).catch(() => {});
     loadCfg().catch(e => toast(errMsg(e), true));
     loadSite(); loadYAML(); banner();
-    return { onTopology: loadSite, update: banner };
+    return { onTopology() { loadSite(); renderMaintenanceTargets(); loadRooms().catch(e => toast(errMsg(e), true)); }, update: banner };
   }
 
 
@@ -2503,7 +2944,7 @@ body { padding: 32px 16px; }
             <div class="help">传输方式：<b>Streamable HTTP</b>（POST，JSON 响应，无会话），兼容协议版本 2024-11-05 ~ 2025-06-18。只支持 stdio 的客户端可通过 <code>mcp-remote</code> 桥接（见右侧 Claude Desktop）。</div>
           </div></div>
 
-          <div class="panel"><div class="ph"><span class="no">2</span>访问设置</div><div class="pb"><form id="mForm"></form></div></div>
+          <div class="panel"><div class="ph"><span class="no">2</span>全局 · 访问设置</div><div class="pb"><div class="help" style="margin-top:0">MCP 开关、只读模式与访问令牌为全局设置；AI 工具读写作用在当前激活机房。</div><form id="mForm"></form></div></div>
 
           <div class="panel"><div class="ph"><span class="no">3</span>连接测试<span class="r"><button class="btn small primary" id="mTest">测试连接</button></span></div>
             <div class="pb"><div id="mTestOut" class="help" style="margin:0">用当前页面按 MCP 协议发送 initialize 和 tools/list，验证接口可用。</div></div></div>
@@ -2762,7 +3203,7 @@ body { padding: 32px 16px; }
           <div class="btns"><button class="btn accent" type="submit">开始自主发现</button><button class="btn hidden" type="button" id="dAiLast">查看上次结果</button></div>
           <div class="help">只探测私有地址和已配置的网段；探测过程不修改任何配置。需要先在「AI 诊断」页设置模型，通常需要 1~5 分钟。</div>
         </form></div></div>
-        <div class="panel"><div class="ph">自动扫描任务<span class="r" style="display:flex;gap:10px;align-items:center">
+        <div class="panel"><div class="ph">自动扫描任务 · 当前机房<span class="r" style="display:flex;gap:10px;align-items:center">
           <label class="checks" title="关闭后所有任务都不再定时运行，仍可手动扫描"><input type="checkbox" id="dMaster"> 自动扫描</label></span></div>
           <div class="pb">
             <div id="dProg"></div>
@@ -2776,7 +3217,7 @@ body { padding: 32px 16px; }
             <textarea name="subnets" rows="2" class="mono" placeholder="192.168.10.0/24, 192.168.11.0/24"></textarea></label>
           <div class="checks"><label><input type="checkbox" name="auto_add" checked> 新设备自动添加为“未定位”</label></div>
           <div class="btns"><button class="btn" type="submit">扫描</button></div></form></div></div>
-        <div class="panel"><div class="ph">全局设置</div><div class="pb"><form id="df"></form></div></div>
+        <div class="panel"><div class="ph">默认扫描设置 · 当前机房</div><div class="pb"><form id="df"></form></div></div>
         <div class="panel"><div class="ph">工作方式</div><div class="pb help" style="margin:0;line-height:1.8">
           <b>1. 扫描</b>：并发 ping 任务网段内每个地址，再读取本机 ARP 表得到 IP ↔ MAC 对应关系（不响应 ping 但在 ARP 中的设备同样算在线）。<br>
           <b>2. 以 MAC 识别设备</b>：拓扑中有 MAC 的节点，扫描发现其 MAC 换了 IP 时，<b>直接修改该节点的 IP</b>，
@@ -3438,7 +3879,7 @@ body { padding: 32px 16px; }
           <div class="btns"><button class="btn accent" id="lRun">立即定位</button><button class="btn" id="lDry">只预览</button></div>
           <div id="lSum" style="margin-top:10px"></div>
         </div></div>
-        <div class="panel"><div class="ph">全局设置</div><div class="pb"><form id="lf"></form></div></div>
+        <div class="panel"><div class="ph">默认 SNMP 设置 · 当前机房</div><div class="pb"><form id="lf"></form></div></div>
         <div class="panel"><div class="ph">交换机上需要的配置（参考）</div><div class="pb">
           <div class="help" style="margin-top:0">自动定位只需开启 SNMP v2c <b>只读</b>团体名，读取标准 BRIDGE-MIB / IF-MIB。需要修改交换机配置时，点右侧「Telnet」手动登录终端。建议限制只允许 netPing 服务器访问。</div>
           <pre class="code">! 锐捷
@@ -3452,7 +3893,7 @@ snmp-agent community read 团体名</pre></div></div>
       </div>
       <div>
         <div class="panel"><div class="ph">交换机读取设置<span class="r"><button class="btn small primary" id="lSaveSw">保存</button></span></div>
-          <div class="pb" style="padding:0"><table class="grid"><thead><tr><th>交换机</th><th>读取地址</th><th>团体名</th><th>读取</th><th>状态</th><th></th></tr></thead><tbody id="lSw"></tbody></table></div>
+          <div class="pb table-wrap" style="padding:0"><table class="grid"><thead><tr><th>交换机</th><th>读取地址</th><th>团体名</th><th>读取</th><th>状态</th><th></th></tr></thead><tbody id="lSw"></tbody></table></div>
           <div class="pb help" style="margin:0">读取地址留空使用交换机的管理 IP；团体名留空使用下方默认团体名。核心交换机没有填管理 IP 时，在这里填写它的任一三层接口地址。</div></div>
         <div class="panel" id="lSugBox"><div class="ph">端口变化待确认<span class="r btns" style="margin:0"><button class="btn small" id="lApplyAll">全部采纳</button></span></div><div class="pb" id="lSug"></div></div>
         <div class="panel"><div class="ph">本次定位<span class="r" id="lChgCnt"></span></div><div class="pb" id="lChg"></div></div>

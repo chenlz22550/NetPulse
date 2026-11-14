@@ -24,6 +24,7 @@ func (s *Server) handleTopology(w http.ResponseWriter) {
 		"topology":        t,
 		"rev":             rev,
 		"changed_on_disk": s.Topo.ChangedOnDisk(),
+		"active_profile":  s.activeProfileID(),
 	})
 }
 
@@ -342,32 +343,45 @@ type summary struct {
 }
 
 func (s *Server) statusPayload() map[string]interface{} {
-	sts := s.Mon.Statuses(true)
-	t, rev := s.Topo.Snapshot()
-	sum := summary{ByState: map[string]int{}, GatewayIP: t.Site.Gateway, AlertsOn: s.Cfg.Get().Alert.Enabled}
-	byID := make(map[string]monitor.Status, len(sts))
-	for _, st := range sts {
-		sum.Total++
-		sum.ByState[st.State]++
-		byID[st.ID] = st
-		if st.IP == t.Site.Gateway && st.LastRTT >= 0 {
-			v := st.Avg1m
-			sum.GatewayRTT = &v
+	for attempt := 0; attempt < 3; attempt++ {
+		pid, ep1 := s.activeProfileState()
+		sts := s.Mon.Statuses(true)
+		t, rev := s.Topo.Snapshot()
+		cfg := s.Cfg.Get()
+		tcpSts := s.Mon.TCPStatuses(true)
+		down := s.Alerts.ActiveDown()
+		changed := s.Topo.ChangedOnDisk()
+		_, ep2 := s.activeProfileState()
+		if ep1 != ep2 && attempt < 2 {
+			continue
+		}
+		sum := summary{ByState: map[string]int{}, GatewayIP: t.Site.Gateway, AlertsOn: cfg.Alert.Enabled}
+		byID := make(map[string]monitor.Status, len(sts))
+		for _, st := range sts {
+			sum.Total++
+			sum.ByState[st.State]++
+			byID[st.ID] = st
+			if st.IP == t.Site.Gateway && st.LastRTT >= 0 {
+				v := st.Avg1m
+				sum.GatewayRTT = &v
+			}
+		}
+		return map[string]interface{}{
+			"active_profile":  pid,
+			"rev":             rev,
+			"paused":          s.Mon.Paused(),
+			"manual_paused":   s.Mon.ManualPaused(),
+			"pause_reason":    s.Mon.PauseReason(),
+			"schedule":        cfg.Schedule.Describe(),
+			"summary":         sum,
+			"statuses":        byID,
+			"tcp_statuses":    tcpSts,
+			"active_down":     down,
+			"changed_on_disk": changed,
+			"server_time":     time.Now().UnixMilli(),
 		}
 	}
-	return map[string]interface{}{
-		"rev":             rev,
-		"paused":          s.Mon.Paused(),
-		"manual_paused":   s.Mon.ManualPaused(),
-		"pause_reason":    s.Mon.PauseReason(),
-		"schedule":        s.Cfg.Get().Schedule.Describe(),
-		"summary":         sum,
-		"statuses":        byID,
-		"tcp_statuses":    s.Mon.TCPStatuses(true),
-		"active_down":     s.Alerts.ActiveDown(),
-		"changed_on_disk": s.Topo.ChangedOnDisk(),
-		"server_time":     time.Now().UnixMilli(),
-	}
+	return map[string]interface{}{}
 }
 
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
@@ -578,6 +592,10 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) error {
 	next.AI = cur.AI     // AI 设置（含 API Key）只能通过 /api/ai/settings 修改
 	if err := s.Cfg.Update(next); err != nil {
 		return badRequest("%v", err)
+	}
+	if err := s.syncActiveRoomSettings(s.Cfg.Get()); err != nil {
+		_ = s.Cfg.Update(cur)
+		return err
 	}
 	restart := next.Listen != cur.Listen || next.TopologyFile != cur.TopologyFile
 	writeJSON(w, map[string]interface{}{"ok": true, "restart_required": restart, "config": publicConfig(s.Cfg.Get())})
