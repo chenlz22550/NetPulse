@@ -72,6 +72,8 @@ type Sender func(cfg config.AlertConfig, content string) error
 type Engine struct {
 	// HoldDown 返回 true 时暂缓该设备的离线告警（网段扫描正在重新解析其 IP）。
 	HoldDown func(id string) bool
+	// OnEvents 在一批告警事件写入历史后调用（含发送结果），用于插件等扩展；在引擎协程中调用，不应阻塞。
+	OnEvents func(evs []Event, notified bool)
 
 	mu       sync.Mutex
 	cfg      func() config.Config
@@ -103,6 +105,13 @@ func NewEngine(cfg func() config.Config, mon *monitor.Monitor, histPath string) 
 	}
 	e.loadHistory()
 	return e
+}
+
+// SetSender 替换消息发送函数（默认 SendNotifications），用于追加插件通知渠道。须在 Run 之前调用。
+func (e *Engine) SetSender(s Sender) {
+	if s != nil {
+		e.send = s
+	}
 }
 
 // SetTopology 在拓扑变化后更新展示信息。
@@ -294,6 +303,9 @@ func (e *Engine) flushIfDue(now time.Time) {
 		}
 	}
 	e.appendHistory(evs)
+	if e.OnEvents != nil {
+		e.OnEvents(append([]Event(nil), evs...), cfg.Enabled && toSend > 0 && sendErr == nil)
+	}
 }
 
 var typeLabel = map[string]string{

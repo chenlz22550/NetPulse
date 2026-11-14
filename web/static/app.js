@@ -267,6 +267,7 @@
       case 'alerts': page = alertsPage(app); break;
       case 'settings': page = settingsPage(app); break;
       case 'mcp': page = mcpPage(app); break;
+      case 'plugins': page = pluginsPage(app); break;
       case 'discovery': page = discoveryPage(app); break;
       case 'locate': page = locatePage(app); break;
       case 'guide': page = guidePage(app); break;
@@ -415,6 +416,16 @@
           <li>页面下方有示例问法，比如“现在机房有哪些设备离线或丢包？”、“扫描一下网段，把新发现的打印机放到接入交换机 Port 7”。</li>
         </ul>
         ${go('mcp', '打开 MCP')}`],
+
+      ['plugins', '插件', `
+        <ul>
+          <li>插件可以给 netPing 增加新的<b>通知渠道</b>（邮件、短信、工单系统…）、在告警或设备变化时<b>执行自定义动作</b>，或给 AI 助手提供<b>新的查询工具</b>。</li>
+          <li>安装：把插件文件夹放进数据目录的 <code>plugins</code> 目录 → 在「插件」页点「重新扫描」→ 填写设置 → 点「测试运行」确认正常 → 点「启用」。新插件默认不启用。</li>
+          <li>通知类插件和企业微信等内置渠道一起收到告警；只用插件发通知时，不填内置渠道地址也可以打开告警开关。</li>
+          <li>插件是独立的小程序，以 netPing 的权限运行，<b>只安装来源可信的插件</b>。网页和 AI 助手都不能上传或安装插件。</li>
+          <li>想自己写插件：用任何语言都可以，「插件」页的「开发指南」里有协议说明和完整示例。</li>
+        </ul>
+        ${go('plugins', '打开插件')}`],
 
       ['account', '登录与安全', `
         <ul>
@@ -2314,6 +2325,162 @@ body { padding: 32px 16px; }
 
 
   // ---------------------------------------------------------------------------
+  // 插件页：启停、设置、测试运行；插件文件需手工放进数据目录的 plugins/
+  function pluginsPage(app) {
+    const HOOK_TXT = {
+      notify: ['通知渠道', '告警、扫描发现、端口定位要推送消息时，把消息交给插件发送'],
+      alert: ['告警事件', '离线、恢复、丢包、延迟高等事件的结构化数据'],
+      discovery: ['扫描发现', '网段扫描发现新设备、IP 变化等'],
+      locate: ['端口定位', '设备被自动挂到交换机端口等'],
+    };
+    let data = null;
+    const outputs = {}; // 插件 id -> 最近一次测试输出的 HTML
+    app.innerHTML = `<div class="page pad"><div class="mcp plug">
+      <div class="mcp-hero">
+        <div>
+          <h2>插件 <span id="pStat"></span></h2>
+          <div class="help" style="margin:0">插件可以给 netPing 增加新的通知渠道（短信、邮件、工单系统…）、在告警和设备变化时执行自定义动作，
+            或给 AI 助手提供新的查询工具。插件是放在数据目录里的独立小程序，用任何语言都能写。</div>
+        </div>
+      </div>
+      <div class="panel"><div class="ph">安装插件<span class="r"><button class="btn small" id="pReload">重新扫描</button>
+        <a class="btn small" href="api/plugins/guide" target="_blank" rel="noopener">开发指南</a></span></div><div class="pb">
+        <div class="copyline"><code id="pDir">-</code><button class="btn small" data-copy="pDir">复制</button></div>
+        <div class="help" style="margin-bottom:0">把插件文件夹（里面有 <code>plugin.yaml</code>）放进上面的目录，点「重新扫描」即可看到。新插件默认<b>未启用</b>，
+          填好设置并点「启用」后才会运行。修改了 <code>plugin.yaml</code> 也需要重新扫描；只改插件程序本身则立即生效。</div>
+      </div></div>
+      <div id="pList"></div>
+      <div class="panel"><div class="ph">最近调用<span class="r muted">重启程序后清空，完整记录见 logs/netping.log</span></div><div class="pb" style="padding:0">
+        <table class="grid flat"><thead><tr><th>时间</th><th>插件</th><th>类型</th><th>结果</th><th>耗时</th><th>说明</th></tr></thead><tbody id="pRuns"></tbody></table>
+      </div></div>
+      <div class="panel"><div class="ph">安全说明</div><div class="pb"><ul class="help" style="margin:0;padding-left:18px">
+        <li>插件以 netPing 的系统账号运行，能读写这台电脑上 netPing 能访问的一切。<b>只安装来源可信、看得懂的插件。</b></li>
+        <li>网页和 MCP 都不能上传或安装插件，只能由能登录这台电脑的人把文件放进插件目录。AI 助手不能启停或配置插件。</li>
+        <li>设置里的密钥保存在 <code>data/plugins.json</code>，网页不回显；调用时通过标准输入传给插件，不出现在命令行里。</li>
+        <li>标记为「修改」的插件工具在 MCP 只读模式下不可用，网页「AI 诊断」永远不会调用。</li>
+      </ul></div></div>
+    </div></div>`;
+    $$('[data-copy]', app).forEach(b => b.onclick = () => copyText($('#' + b.dataset.copy).textContent));
+
+    const hookLabel = h => h === 'tool' ? '工具' : (HOOK_TXT[h] ? HOOK_TXT[h][0] : h);
+    function settingInput(s) {
+      const name = 's_' + s.key, req = s.required ? ' <b style="color:var(--down)">*</b>' : '';
+      const help = s.help ? `<div class="help" style="margin:2px 0 0">${esc(s.help)}</div>` : '';
+      if (s.type === 'bool') return `<label class="f"><span>${esc(s.label)}</span><label style="font-size:12px"><input type="checkbox" name="${name}" ${s.value ? 'checked' : ''}> 开启</label>${help}</label>`;
+      let input;
+      if (s.type === 'select') input = `<select name="${name}">${s.required ? '' : '<option value=""></option>'}${s.options.map(o => `<option${o === s.value ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
+      else if (s.type === 'text') input = `<textarea name="${name}" rows="3">${esc(s.value || '')}</textarea>`;
+      else if (s.type === 'secret') input = `<input type="password" name="${name}" autocomplete="new-password" placeholder="${s.set ? '已填写，留空表示不修改' : '未填写'}">`;
+      else if (s.type === 'number') input = `<input type="number" step="any" name="${name}" value="${esc(String(s.value == null ? '' : s.value))}">`;
+      else input = `<input type="text" name="${name}" value="${esc(s.value || '')}" autocomplete="off">`;
+      return `<label class="f"><span>${esc(s.label)}${req}</span>${input}${help}</label>`;
+    }
+    function pluginPanel(p) {
+      const state = p.error ? '<span class="badge down">清单无效</span>' : p.enabled ? '<span class="badge ok">已启用</span>' : '<span class="badge unknown">未启用</span>';
+      const head = `<div class="ph"><span>${esc(p.name)}</span>${p.version ? `<span class="muted mono" style="font-weight:normal">${esc(p.version)}</span>` : ''}${state}
+        <span class="r">${p.error ? '' : `<button class="btn small ${p.enabled ? '' : 'primary'}" data-toggle="${esc(p.id)}">${p.enabled ? '停用' : '启用'}</button>`}</span></div>`;
+      if (p.error) {
+        return `<div class="panel">${head}<div class="pb"><div class="problems" style="margin:0 0 8px">${esc(p.error)}</div>
+          <div class="help" style="margin:0">目录：<code>${esc(p.dir)}</code>。修正 plugin.yaml 后点「重新扫描」。</div></div></div>`;
+      }
+      const hooks = p.hooks.map(h => `<span class="badge unknown" title="${esc(HOOK_TXT[h] ? HOOK_TXT[h][1] : '')}">${esc(hookLabel(h))}</span>`).join(' ');
+      const tools = p.tools.length ? `<table class="grid flat" style="margin-top:10px"><thead><tr><th>工具</th><th>说明</th><th>类型</th></tr></thead><tbody>${p.tools.map(t =>
+        `<tr><td class="mono"><b>${esc(t.full_name)}</b><br><span class="muted" style="font-family:var(--sans)">${esc(t.title)}</span></td><td class="wrap">${esc(t.description)}</td>
+         <td>${t.write ? '<span class="badge slow">修改</span>' : '<span class="badge ok">查询</span>'}${t.ai ? ' <span class="badge ok" title="网页「AI 诊断」可以调用">AI 诊断</span>' : ''}</td></tr>`).join('')}</tbody></table>` : '';
+      const settings = p.settings.length ? `<form data-settings="${esc(p.id)}" style="margin-top:12px;max-width:560px">
+        ${p.settings.map(settingInput).join('')}<div class="btns"><button class="btn primary" type="submit">保存设置</button></div></form>` : '';
+      const opts = p.hooks.map(h => `<option value="hook:${esc(h)}">${esc(hookLabel(h))}（示例数据）</option>`)
+        .concat(p.tools.map(t => `<option value="tool:${esc(t.name)}">工具 ${esc(t.name)}</option>`)).join('');
+      return `<div class="panel">${head}<div class="pb">
+        ${p.description ? `<div style="margin-bottom:8px">${esc(p.description)}</div>` : ''}
+        <div class="kv"><code>功能</code><span>${hooks}${p.tools.length ? ` <span class="badge unknown">工具 ${p.tools.length} 个</span>` : ''}</span></div>
+        <div class="kv"><code>运行命令</code><span class="mono">${esc(p.command.join(' '))}（超时 ${p.timeout_sec} 秒）</span></div>
+        <div class="kv"><code>目录</code><span class="mono">${esc(p.dir)}</span></div>
+        ${p.author || p.homepage ? `<div class="kv"><code>作者</code><span>${esc(p.author || '')} ${/^https?:\/\//.test(p.homepage || '') ? `<a href="${esc(p.homepage)}" target="_blank" rel="noopener noreferrer">${esc(p.homepage)}</a>` : ''}</span></div>` : ''}
+        ${tools}${settings}
+        <form data-test="${esc(p.id)}" style="margin-top:12px">
+          <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+            <select name="what" style="width:auto">${opts}</select>
+            <input type="text" name="args" class="mono" style="flex:1;min-width:200px;display:none" placeholder='工具参数（JSON），如 {"ip":"192.168.1.10"}' autocomplete="off">
+            <button class="btn small" type="submit">测试运行</button>
+            <span class="muted" style="font-size:12px">会真实运行一次插件程序${p.enabled ? '' : '（未启用也可以测试）'}</span>
+          </div>
+          <div data-out="${esc(p.id)}">${outputs[p.id] || ''}</div>
+        </form>
+      </div></div>`;
+    }
+    function testOutput(r) {
+      const j = v => esc(JSON.stringify(v, null, 2));
+      return `<div style="margin-top:8px">${r.ok ? `<div class="v-ok"><b>✓ 成功</b>（${r.ms}ms）${r.message ? '：' + esc(r.message) : ''}</div>`
+        : `<div class="v-down"><b>✗ 失败</b>（${r.ms}ms）：${esc(r.error || '')}</div>`}
+        ${r.result !== undefined && r.result !== null ? `<div class="help" style="margin:6px 0 2px">插件返回的 result</div><pre class="code" style="max-height:240px">${j(r.result)}</pre>` : ''}
+        ${r.stderr ? `<div class="help" style="margin:6px 0 2px">标准错误输出（stderr）</div><pre class="code" style="max-height:160px">${esc(r.stderr)}</pre>` : ''}
+        <details style="margin-top:6px"><summary class="help" style="cursor:pointer;margin:0">查看发给插件的请求</summary><pre class="code" style="max-height:320px">${j(r.request)}</pre></details></div>`;
+    }
+    function draw() {
+      const ps = data.plugins;
+      const on = ps.filter(p => p.enabled).length, bad = ps.filter(p => p.error).length;
+      $('#pStat').innerHTML = `<span class="badge ${on ? 'ok' : 'unknown'}">已启用 ${on} / ${ps.length}</span>${bad ? ` <span class="badge down">${bad} 个清单无效</span>` : ''}`;
+      $('#pDir').textContent = data.dir || '-';
+      $('#pList').innerHTML = ps.length ? ps.map(pluginPanel).join('')
+        : `<div class="panel"><div class="empty">还没有安装插件。把插件文件夹放进上面的目录后点「重新扫描」；想自己写一个，请看「开发指南」。</div></div>`;
+      $('#pRuns').innerHTML = data.runs.length ? data.runs.map(r => `<tr><td class="mono">${esc(fmtTime(r.time))}</td><td>${esc(r.plugin)}</td>
+        <td>${esc(hookLabel(r.hook))}${r.tool ? ' ' + esc(r.tool) : ''}${r.test ? ' <span class="badge unknown">测试</span>' : ''}</td>
+        <td>${r.ok ? '<span class="badge ok">成功</span>' : '<span class="badge down">失败</span>'}</td><td class="mono">${r.ms}ms</td>
+        <td class="wrap">${esc(r.ok ? (r.message || '') : (r.error || ''))}</td></tr>`).join('')
+        : '<tr><td colspan="6" class="muted" style="text-align:center;padding:16px">暂无调用记录</td></tr>';
+      $$('[data-toggle]', app).forEach(b => b.onclick = async () => {
+        const p = ps.find(x => x.id === b.dataset.toggle);
+        if (!p.enabled && !confirm(`启用插件「${p.name}」？\n\n启用后它会以 netPing 的权限在这台电脑上运行：\n${p.command.join(' ')}\n\n请确认插件来源可信。`)) return;
+        try {
+          data = await api('PUT', 'api/plugins/' + encodeURIComponent(p.id), { enabled: !p.enabled });
+          toast(p.enabled ? `已停用「${p.name}」` : `已启用「${p.name}」`); draw();
+        } catch (e) { toast(errMsg(e), true); }
+      });
+      $$('form[data-settings]', app).forEach(f => f.onsubmit = async ev => {
+        ev.preventDefault();
+        const p = ps.find(x => x.id === f.dataset.settings), settings = {};
+        for (const s of p.settings) {
+          const el = f.elements['s_' + s.key];
+          if (s.type === 'bool') settings[s.key] = el.checked;
+          else if (s.type === 'number') settings[s.key] = el.value.trim() === '' ? null : Number(el.value);
+          else settings[s.key] = el.value;
+        }
+        try { data = await api('PUT', 'api/plugins/' + encodeURIComponent(p.id), { settings }); toast('设置已保存，下次调用生效'); draw(); }
+        catch (e) { toast(errMsg(e), true); }
+      });
+      $$('form[data-test]', app).forEach(f => {
+        const sync = () => { f.elements.args.style.display = f.elements.what.value.startsWith('tool:') ? '' : 'none'; };
+        f.elements.what.onchange = sync; sync();
+        f.onsubmit = async ev => {
+          ev.preventDefault();
+          const id = f.dataset.test, [kind, name] = f.elements.what.value.split(':');
+          const body = kind === 'tool' ? { tool: name, arguments: {} } : { hook: name };
+          if (kind === 'tool' && f.elements.args.value.trim()) {
+            try { body.arguments = JSON.parse(f.elements.args.value); } catch (e) { toast('工具参数不是有效的 JSON', true); return; }
+          }
+          const out = $(`[data-out="${id}"]`, f);
+          out.innerHTML = '<div class="help" style="margin:8px 0 0">运行中…</div>';
+          try {
+            outputs[id] = testOutput(await api('POST', 'api/plugins/' + encodeURIComponent(id) + '/test', body));
+            const keep = { what: f.elements.what.value, args: f.elements.args.value };
+            await load();
+            const nf = $(`form[data-test="${id}"]`, app);
+            if (nf) { nf.elements.what.value = keep.what; nf.elements.args.value = keep.args; nf.elements.what.onchange(); }
+          } catch (e) { out.innerHTML = `<div class="v-down" style="margin-top:8px">${esc(errMsg(e))}</div>`; }
+        };
+      });
+    }
+    async function load() { data = await api('GET', 'api/plugins'); draw(); }
+    $('#pReload').onclick = async () => {
+      try { data = await api('POST', 'api/plugins/reload'); draw(); toast(`已重新扫描，共 ${data.plugins.length} 个插件`); }
+      catch (e) { toast(errMsg(e), true); }
+    };
+    load().catch(e => toast(errMsg(e), true));
+    return {};
+  }
+
+  // ---------------------------------------------------------------------------
   // MCP 接入说明
   function mcpPage(app) {
     let info = null, cfg = null, tab = sessionStorage.getItem('np_mcp_tab') || 'claude';
@@ -2513,7 +2680,7 @@ body { padding: 32px 16px; }
       s.push(info.read_only ? '<span class="badge slow">只读</span>' : '<span class="badge unknown">可读写</span>');
       s.push(info.token_set ? '<span class="badge ok">令牌认证</span>' : info.auth_basic ? '<span class="badge unknown">需要令牌</span>' : '<span class="badge slow">尚未设置密码</span>');
       $('#mStat').innerHTML = s.join(' ');
-      const kind = t => t.destructive ? '<span class="badge down">修改·需确认</span>' : t.write ? '<span class="badge slow">修改</span>' : t.probe ? '<span class="badge ok" title="从 netPing 主机实时发包探测，只读">查询·实时探测</span>' : '<span class="badge ok">查询</span>';
+      const kind = t => (t.plugin ? '<span class="badge unknown">插件</span> ' : '') + (t.destructive ? '<span class="badge down">修改·需确认</span>' : t.write ? '<span class="badge slow">修改</span>' : t.probe ? '<span class="badge ok" title="从 netPing 主机实时发包探测，只读">查询·实时探测</span>' : '<span class="badge ok">查询</span>');
       $('#mTools').innerHTML = info.tools.map(t => `<tr${info.read_only && t.write ? ' class="dim"' : ''}><td class="mono"><b>${esc(t.name)}</b><br><span class="muted" style="font-family:var(--sans)">${esc(t.title)}</span></td><td class="wrap">${esc(t.description)}</td><td>${kind(t)}</td></tr>`).join('');
       const nw = info.tools.filter(t => !t.write).length;
       $('#mToolCnt').textContent = `${info.tools.length} 个（查询 ${nw}，修改 ${info.tools.length - nw}）${info.read_only ? '，只读模式下修改类工具不可用' : ''}`;

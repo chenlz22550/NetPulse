@@ -59,6 +59,8 @@ type Service struct {
 	Cfg    *config.Manager
 	Topo   *topology.Store
 	Notify Notifier
+	// OnChanges 在一次定位产生了变更后调用（用于插件的 locate 钩子），不应阻塞。
+	OnChanges func(r *RunResult)
 
 	dataDir  string
 	mu       sync.Mutex
@@ -287,6 +289,9 @@ func (s *Service) RunNow(reason string, dryRun, applyMoves bool, only ...string)
 }
 
 func (s *Service) notify(r *RunResult) {
+	if s.OnChanges != nil && len(r.Changes) > 0 {
+		s.OnChanges(r)
+	}
 	if s.Notify == nil || !s.Cfg.Get().Locate.Notify {
 		return
 	}

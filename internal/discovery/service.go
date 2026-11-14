@@ -60,6 +60,8 @@ type Service struct {
 	Notify Notifier
 	// OnAdded 在扫描添加了新设备后调用（用于触发端口定位）。
 	OnAdded func()
+	// OnChanges 在一次扫描产生了变更后调用（用于插件的 discovery 钩子），不应阻塞。
+	OnChanges func(r *ScanResult)
 
 	dataDir string
 
@@ -772,6 +774,9 @@ var changeLabel = map[string]string{
 }
 
 func (s *Service) notify(r *ScanResult) {
+	if s.OnChanges != nil && len(r.Changes) > 0 {
+		s.OnChanges(r)
+	}
 	if s.Notify == nil || !s.Cfg.Get().Discovery.Notify {
 		return
 	}

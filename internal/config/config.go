@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"gopkg.in/yaml.v3"
 	"netping/internal/llm"
@@ -567,6 +568,19 @@ func cleanList(in []string) []string {
 	return out
 }
 
+// extraChannels 由插件系统注册：是否有已启用的通知类插件。
+var extraChannels atomic.Value // func() bool
+
+// SetExtraChannels 注册“是否存在内置渠道以外的通知渠道”（通知类插件）的判断函数。
+// 注册后，只启用了通知插件、没有填写任何内置渠道地址时也允许开启告警。
+func SetExtraChannels(fn func() bool) { extraChannels.Store(fn) }
+
+// HasExtraChannels 是否有内置渠道以外的通知渠道（通知类插件）。
+func HasExtraChannels() bool {
+	fn, _ := extraChannels.Load().(func() bool)
+	return fn != nil && fn()
+}
+
 // HasChannels indicates whether at least one notification destination is configured.
 func (a AlertConfig) HasChannels() bool {
 	return a.WebhookURL != "" || a.DingTalkURL != "" || a.FeishuURL != "" || a.SlackURL != "" || a.GenericWebhookURL != ""
@@ -581,8 +595,8 @@ func (a AlertConfig) ValidateChannels() error {
 			return fmt.Errorf("%s 不是有效的 http(s) 地址", name)
 		}
 	}
-	if a.Enabled && !a.HasChannels() {
-		return errors.New("启用告警前需要填写至少一个通知渠道的 webhook 地址")
+	if a.Enabled && !a.HasChannels() && !HasExtraChannels() {
+		return errors.New("启用告警前需要填写至少一个通知渠道的 webhook 地址，或启用一个通知类插件")
 	}
 	return nil
 }

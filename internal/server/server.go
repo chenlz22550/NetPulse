@@ -18,6 +18,7 @@ import (
 	"netping/internal/discovery"
 	"netping/internal/locate"
 	"netping/internal/monitor"
+	"netping/internal/plugin"
 	"netping/internal/store"
 	"netping/internal/topology"
 	"netping/web"
@@ -36,6 +37,9 @@ type Server struct {
 	Disc    *discovery.Service
 	Loc     *locate.Service
 	BaseDir string
+	// Plugins 插件管理器（可为 nil）；PluginDocMD 为插件开发指南，网页与 MCP 资源共用。
+	Plugins     *plugin.Manager
+	PluginDocMD []byte
 	// DocsMD / SchemaJSON 为字段说明与 JSON Schema，作为 MCP 资源提供。
 	DocsMD     []byte
 	SchemaJSON []byte
@@ -275,6 +279,8 @@ func (s *Server) routeAPI(w http.ResponseWriter, r *http.Request) {
 		err = s.handleDiscoveryAdd(w, r)
 	case head == "discovery" && arg == "apply" && m == http.MethodPost:
 		err = s.handleDiscoveryApply(w, r)
+	case head == "plugins":
+		err = s.handlePlugins(w, r, arg)
 	case head == "mcp" && m == http.MethodGet:
 		s.handleMCPInfo(w)
 	case head == "alerting" && m == http.MethodPost:

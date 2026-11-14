@@ -5,3 +5,8 @@ dist/
 /logs/
 *.tmp
 .DS_Store
+/plugins/
+/devdata/
+__pycache__/
+examples/plugins/event-log/event-log
+examples/plugins/event-log/event-log.exe

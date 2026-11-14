@@ -1,0 +1,40 @@
+# netPing 示例插件（Go）：记录事件并提供查询工具。
+# 安装：编译出 event-log(.exe)，连同本文件放到 <数据目录>/plugins/event-log/，在网页「插件」页重新扫描并启用。
+id: event-log
+name: 事件记录
+version: 1.0.0
+description: 把告警、扫描发现、端口定位事件记录到本地文件，并提供按设备查询最近事件的工具。
+author: netPing
+api_version: 1
+command: ["./event-log"]
+timeout_sec: 10
+hooks: [alert, discovery, locate]
+tools:
+  - name: recent_events
+    title: 最近事件
+    description: 查询事件记录插件保存的最近事件（告警、新设备、IP 变化、端口变化），可按 IP、名称等关键词和事件来源筛选，新的在前。
+    ai: true
+    input_schema:
+      type: object
+      properties:
+        query:
+          type: string
+          description: 关键词，匹配 IP、名称、MAC、说明；留空返回全部
+        source:
+          type: string
+          enum: [alert, discovery, locate]
+          description: 只看某一类事件
+        limit:
+          type: integer
+          description: 最多返回条数，默认 20，最大 200
+settings:
+  - key: max_rows
+    label: 最多保留条数
+    type: number
+    default: 5000
+    help: 超过后自动删除最旧的记录
+  - key: record_recovery
+    label: 记录恢复类事件
+    type: bool
+    default: true
+    help: 关闭后不记录“恢复 / 丢包恢复 / 延迟恢复”

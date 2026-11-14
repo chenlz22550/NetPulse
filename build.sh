@@ -14,6 +14,6 @@ mkdir -p dist
 "$GO" test ./...
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 "$GO" build -trimpath \
   -ldflags "-H windowsgui -s -w -X main.version=$VERSION" -o dist/netPing.exe .
-cp docs/topology-fields.md dist/
+cp docs/topology-fields.md docs/plugin-development.md dist/
 cp schema/topology.schema.json dist/
 echo "已生成 dist/netPing.exe"

@@ -38,6 +38,7 @@
 | AI 诊断 | 用大模型（默认 DeepSeek deepseek-flash）结合实时数据与历史曲线诊断网络问题：一键诊断、快捷问题、追问，设备详情可直接诊断单台设备 |
 | 运维报告 | AI 生成日报 / 周报 / 月报：可用率、丢包、延迟、中断、告警统计与趋势图表，结论、风险与处理建议；保存历史报告，可下载 Markdown、导出 HTML 或打印为 PDF |
 | MCP | AI 客户端接入：开关与只读模式、访问令牌、各客户端配置片段、连接测试、工具清单和示例问法 |
+| 插件 | 已安装插件的启用 / 停用、设置、测试运行、最近调用记录，以及插件开发指南 |
 | 教程 | 使用指南：快速上手、看懂拓扑图、告警、扫描发现、端口定位、MCP、登录与安全、常见问题 |
 
 ## 告警通知渠道
@@ -174,6 +175,32 @@ AI 客户端连接需要访问令牌：在「MCP」页点「生成」并保存�
 `config.yaml` 中的 `mcp` 段：`enabled` 开关、`read_only` 只读模式、`token` 访问令牌（设置后客户端需带 `Authorization: Bearer <token>`）。
 所有写操作记录在 `logs/netping.log`。
 
+## 插件
+
+插件用来在不修改 netPing 的情况下扩展它，目前支持三类能力：
+
+| 能力 | 用途 |
+|---|---|
+| 通知渠道（`notify`） | 把告警、扫描发现、端口定位通知发到邮件、短信、工单系统等，与企业微信等内置渠道并列 |
+| 事件处理（`alert` / `discovery` / `locate`） | 拿到结构化的告警、新设备、IP 变化、端口变化事件，联动其他系统 |
+| AI 工具（`tools`） | 给 MCP 客户端和网页「AI 诊断」增加查询外部数据的工具，名字为 `plugin_<插件 id>_<工具名>` |
+
+插件是数据目录下 `plugins/<插件 id>/` 里的一个文件夹：一份 `plugin.yaml` 清单加一个用任意语言写的程序。
+netPing 需要时启动它，把一个 JSON 请求写到标准输入，从标准输出读回一个 JSON 响应（一次调用一个进程，不常驻）。
+主程序仍是单个 exe，插件崩溃或超时不会影响监控。
+
+使用：把插件文件夹放进 `plugins/` → 管理页面「插件」页点「重新扫描」→ 填写设置 →「测试运行」→「启用」。
+
+- 新插件默认**不启用**；启用状态和设置保存在 `data/plugins.json`，密钥不在网页回显。
+- 只启用了通知插件、没有填写内置渠道地址时，也可以开启告警总开关。
+- 插件以 netPing 的系统账号运行，**只安装来源可信的插件**。网页和 MCP 都不能上传或安装插件，AI 助手不能启停或配置插件。
+- 插件声明为“修改”类的工具在 MCP 只读模式下不可用，网页「AI 诊断」永远不会调用；只有插件明确开放（`ai: true`）的只读工具才会交给 AI 诊断。
+- 每次调用记录在 `logs/netping.log`，「插件」页显示最近 50 次调用的结果和耗时。
+
+**开发插件**见 [docs/plugin-development.md](docs/plugin-development.md)（清单字段、请求 / 响应协议、各钩子的数据格式、调试方法）。
+同一份文档也可在「插件」页点「开发指南」打开，或通过 MCP 资源 `netping://docs/plugin-development.md` 交给 AI 助手代写插件。
+两个完整示例在 [examples/plugins](examples/plugins)：`email-notify`（Python，SMTP 邮件通知）和 `event-log`（Go，记录事件并提供查询工具）。
+
 ## 网段扫描与 IP 跟踪
 
 「扫描发现」页（`config.yaml` 的 `discovery` 段）提供**自动扫描模式**：建立一个或多个扫描任务，每个任务指定一个或多个网段和扫描间隔，
@@ -281,6 +308,8 @@ internal/discovery         网段扫描、ARP 读取、按 MAC 跟踪 IP、自�
 internal/snmp              精简 SNMP v2c 只读客户端（及测试用模拟代理）
 internal/locate            读取交换机 MAC 表、判定设备所在端口、自动定位
 internal/server            REST API + SSE 实时推送
+internal/plugin            插件系统：清单加载与校验、启停与设置、启动插件进程、通知 / 事件 / 工具调用
+examples/plugins           示例插件（email-notify、event-log）
 internal/tray              托盘图标与菜单
 web/static                 管理页面（原生 JS + SVG，无构建步骤，打包进 exe）
 ```
@@ -294,6 +323,7 @@ go test -count=1 ./...
 go test -race -count=1 ./...
 go vet ./...
 node --test web/charts_test.cjs
+python3 examples/plugins/email-notify/test_main.py   # 可选：Python 示例插件自测（只连接本机假 SMTP 服务器）
 ```
 
 测试通过临时目录、本地 HTTP/UDP 模拟服务运行，不使用生产拓扑或向真实企业微信群发送消息；运行环境需要允许监听本地端口。
