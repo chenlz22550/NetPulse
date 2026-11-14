@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -68,14 +69,18 @@ type Report struct {
 
 // rptKPI 报告的关键指标（程序统计，不经模型）。
 type rptKPI struct {
-	Monitored    int     `json:"monitored"`
-	WithData     int     `json:"with_data"`
-	Availability float64 `json:"availability_pct"`
-	LossPct      float64 `json:"loss_pct"`
-	AvgMs        float64 `json:"avg_ms"`
-	DownMinutes  int     `json:"down_minutes"`
-	Abnormal     int     `json:"abnormal_now"`
-	Alerts       int     `json:"alerts"`
+	SuccessSamples  int     `json:"success_samples"`
+	HasData         bool    `json:"has_data"`
+	ObservedMinutes int     `json:"observed_minutes"`
+	FaultEpisodes   int     `json:"fault_episodes"`
+	Monitored       int     `json:"monitored"`
+	WithData        int     `json:"with_data"`
+	Availability    float64 `json:"availability_pct"`
+	LossPct         float64 `json:"loss_pct"`
+	AvgMs           float64 `json:"avg_ms"`
+	DownMinutes     int     `json:"down_minutes"`
+	Abnormal        int     `json:"abnormal_now"`
+	Alerts          int     `json:"alerts"`
 }
 
 type rptDev struct {
@@ -141,7 +146,10 @@ type rptData struct {
 }
 
 func (d *rptData) kpi() rptKPI {
-	k := rptKPI{Monitored: d.Monitored, WithData: len(d.Devs), DownMinutes: d.DownMin, Abnormal: len(d.Abnormal), Alerts: len(d.Alerts), Availability: 100}
+	k := rptKPI{Monitored: d.Monitored, WithData: len(d.Devs), DownMinutes: d.DownMin, Abnormal: len(d.Abnormal), Alerts: len(d.Alerts), HasData: d.Minutes > 0, ObservedMinutes: d.Minutes, SuccessSamples: d.Recv}
+	for _, dev := range d.Devs {
+		k.FaultEpisodes += dev.Episodes
+	}
 	if d.Sent > 0 {
 		k.LossPct = r2(float64(d.Sent-d.Recv) * 100 / float64(d.Sent))
 	}
@@ -289,7 +297,7 @@ func (s *Server) collectReport(rg string, now time.Time) (*rptData, error) {
 	}
 
 	for _, ev := range s.Alerts.History(0) {
-		if ev.Time.Before(d.From) || ev.Type == alert.EvTest {
+		if ev.Time.Before(d.From) || !ev.Time.Before(d.To) || ev.Type == alert.EvTest {
 			continue
 		}
 		d.Alerts = append(d.Alerts, ev)
@@ -346,6 +354,9 @@ func (d *rptData) contextText(s *Server) string {
 	cfg := s.Cfg.Get()
 	k := d.kpi()
 	var b strings.Builder
+	if !k.HasData {
+		b.WriteString("本周期无观测样本，所有可用率、丢包和延迟数值均不可用于判断健康状态。\n")
+	}
 	fmt.Fprintf(&b, "【报告类型】%s（%s）：%s ~ %s\n", d.Kind, d.Label, d.From.Format("2006-01-02 15:04"), d.To.Format("2006-01-02 15:04"))
 	if d.RetentionShort {
 		fmt.Fprintf(&b, "注意：历史数据只保留 %d 天，统计周期早于此的部分没有数据。\n", cfg.RetentionDays)
@@ -499,11 +510,23 @@ func (d *rptData) appendix() string {
 	fmt.Fprintf(&b, "以下数据由 netPing 直接统计，未经 AI 加工。统计周期 %s ~ %s。\n\n", d.From.Format("2006-01-02 15:04"), d.To.Format("2006-01-02 15:04"))
 	b.WriteString("| 指标 | 数值 |\n|---|---|\n")
 	fmt.Fprintf(&b, "| 启用监控设备 | %d 台（周期内有数据 %d 台） |\n", d.Monitored, len(d.Devs))
-	fmt.Fprintf(&b, "| 全网可用率 | %.2f%% |\n", k.Availability)
-	fmt.Fprintf(&b, "| 整体丢包率 | %.2f%% |\n", k.LossPct)
-	fmt.Fprintf(&b, "| 平均延迟 | %.1f ms |\n", k.AvgMs)
+	if k.HasData {
+		fmt.Fprintf(&b, "| 全网可用率 | %.2f%% |\n", k.Availability)
+	} else {
+		b.WriteString("| 全网可用率 | 无数据 |\n")
+	}
+	if k.HasData {
+		fmt.Fprintf(&b, "| 整体丢包率 | %.2f%% |\n", k.LossPct)
+	} else {
+		b.WriteString("| 整体丢包率 | 无数据 |\n")
+	}
+	if d.Recv > 0 {
+		fmt.Fprintf(&b, "| 平均延迟 | %.1f ms |\n", k.AvgMs)
+	} else {
+		b.WriteString("| 平均延迟 | 无成功样本 |\n")
+	}
 	fmt.Fprintf(&b, "| 累计中断 | %d 设备·分钟 |\n", k.DownMinutes)
-	fmt.Fprintf(&b, "| 告警事件 | %d 条 |\n", k.Alerts)
+	fmt.Fprintf(&b, "| 告警事件 | %d 条 |\n| 故障次数（连续丢包分钟段） | %d 次 |\n", k.Alerts, k.FaultEpisodes)
 	fmt.Fprintf(&b, "| 当前异常 | %d 台 |\n", k.Abnormal)
 	if d.Prev != nil {
 		fmt.Fprintf(&b, "| 上一周期丢包率 / 平均延迟 | %.2f%% / %.1f ms |\n", d.Prev.loss(), d.Prev.avg())
@@ -517,6 +540,7 @@ func (d *rptData) appendix() string {
 	} else if len(d.Devs) > 0 {
 		b.WriteString("\n周期内所有设备均无丢包。\n")
 	}
+	b.WriteString("\n仅统计被激活机房的实际观测时段；非激活时段和缺失数据不计为故障。\n")
 	b.WriteString("\n口径：可用率 = 1 − 整分钟全部丢包的分钟数 ÷ 有数据的分钟数；暂停监控、非监控时段没有数据，不计入。\n")
 	return b.String()
 }
@@ -565,9 +589,20 @@ func reportTitle(md, def string) string {
 // ---------------------------------------------------------------------------
 // 存储
 
-func (s *Server) reportDir() string { return filepath.Join(s.BaseDir, "data", "reports") }
+func (s *Server) reportDir() string {
+	if s.Alerts != nil {
+		if dir := s.Alerts.DataDir(); dir != "" {
+			return filepath.Join(dir, "reports")
+		}
+	}
+	return filepath.Join(s.BaseDir, "data", "reports")
+}
+
+var reportSaveMu sync.Mutex
 
 func (s *Server) saveReport(rp *Report) error {
+	reportSaveMu.Lock()
+	defer reportSaveMu.Unlock()
 	dir := s.reportDir()
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
@@ -576,6 +611,11 @@ func (s *Server) saveReport(rp *Report) error {
 	for i := 1; ; i++ {
 		if _, err := os.Stat(filepath.Join(dir, rp.ID+".json")); os.IsNotExist(err) {
 			break
+		} else if err != nil {
+			return err
+		}
+		if i > 999 {
+			return errors.New("同一秒生成报告过多，请稍后重试")
 		}
 		rp.ID = fmt.Sprintf("%s-%d", base, i)
 	}
@@ -766,7 +806,11 @@ func (s *Server) handleReports(w http.ResponseWriter, r *http.Request, arg strin
 		name := "netPing-运维报告-" + rp.ID + ".md"
 		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 		w.Header().Set("Content-Disposition", `attachment; filename="netPing-report-`+rp.ID+`.md"; filename*=UTF-8''`+urlPathEscape(name))
-		_, _ = w.Write([]byte(rp.Markdown + "\n\n> 由 netPing AI 生成（" + rp.Model + "），生成时间 " + rp.Time + "\n"))
+		generator := "netPing AI（" + rp.Model + "）"
+		if rp.Model == "deterministic" {
+			generator = "netPing 程序统计"
+		}
+		_, _ = w.Write([]byte(rp.Markdown + "\n\n> 由 " + generator + " 生成，生成时间 " + rp.Time + "\n"))
 		return nil
 	case http.MethodDelete:
 		if !reportIDRe.MatchString(id) {

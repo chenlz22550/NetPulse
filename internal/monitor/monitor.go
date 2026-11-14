@@ -129,12 +129,15 @@ func BuildTargets(t *topology.Topology, d config.PingDefaults) []Target {
 }
 
 type flushItem struct {
-	id string
-	m  store.Minute
+	id   string
+	m    store.Minute
+	done chan struct{}
 }
 
 // Monitor 管理所有监控协程。
 type Monitor struct {
+	switchMu  sync.Mutex
+	switching atomic.Bool
 	mu        sync.RWMutex
 	workers   map[string]*worker
 	store     *store.Store
@@ -161,6 +164,10 @@ func New(st *store.Store, downAfter func() int) *Monitor {
 
 func (m *Monitor) writer() {
 	for it := range m.flushCh {
+		if it.done != nil {
+			close(it.done)
+			continue
+		}
 		if m.store == nil {
 			continue
 		}
@@ -171,10 +178,43 @@ func (m *Monitor) writer() {
 	close(m.closed)
 }
 
+// BeginSwitch stops all workers, waits for in-flight probes, and drains buffered minute records
+// before the caller swaps the backing store directory. Must be paired with EndSwitch.
+func (m *Monitor) BeginSwitch() {
+	m.switchMu.Lock()
+	m.switching.Store(true)
+	m.mu.Lock()
+	for id, w := range m.workers {
+		w.stop()
+		delete(m.workers, id)
+	}
+	m.mu.Unlock()
+	m.wg.Wait()
+	done := make(chan struct{})
+	select {
+	case m.flushCh <- flushItem{done: done}:
+		select {
+		case <-done:
+		case <-m.closed:
+		}
+	case <-m.closed:
+	}
+}
+
+// EndSwitch resumes monitoring with the given targets and releases the switch lock.
+func (m *Monitor) EndSwitch(targets []Target) {
+	m.switching.Store(false)
+	m.Sync(targets)
+	m.switchMu.Unlock()
+}
+
 // Sync 让正在运行的监控与目标列表一致。
 func (m *Monitor) Sync(targets []Target) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.switching.Load() {
+		return
+	}
 	want := map[string]Target{}
 	for _, t := range targets {
 		want[t.ID] = t
@@ -279,6 +319,8 @@ func (m *Monitor) Recent(id string, sinceMs int64) []Sample {
 
 // Close 停止所有协程并把未落盘的分钟数据写入。
 func (m *Monitor) Close() {
+	m.switchMu.Lock()
+	defer m.switchMu.Unlock()
 	m.mu.Lock()
 	for id, w := range m.workers {
 		w.stop()

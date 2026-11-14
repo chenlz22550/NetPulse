@@ -405,6 +405,7 @@ type discUndo struct {
 }
 
 func (s *Server) handleAIDiscoverApply(w http.ResponseWriter, r *http.Request) error {
+	defer s.Topo.ProfileWork()()
 	var req struct {
 		Devices  []discDevice `json:"devices"`
 		ScanJobs []discJob    `json:"scan_jobs"`

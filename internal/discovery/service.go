@@ -84,14 +84,45 @@ type Service struct {
 func New(cfg *config.Manager, topo *topology.Store, mon *monitor.Monitor, dataDir string) *Service {
 	s := &Service{Cfg: cfg, Topo: topo, Mon: mon, dataDir: dataDir, results: map[string]*ScanResult{},
 		pending: map[string]time.Time{}, lastTry: map[string]time.Time{}, upAt: map[string]string{}}
-	s.load()
+	s.mu.Lock()
+	s.loadLocked()
+	s.mu.Unlock()
 	return s
+}
+
+// DataDir returns the current data directory for discovery state.
+func (s *Service) DataDir() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.dataDir
+}
+
+// SwitchDataDir switches the discovery state directory and reloads room-scoped results/events.
+func (s *Service) SwitchDataDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.running {
+		return ErrRunning
+	}
+	s.dataDir = dir
+	s.last = nil
+	s.results = map[string]*ScanResult{}
+	s.events = nil
+	s.pending = map[string]time.Time{}
+	s.lastTry = map[string]time.Time{}
+	s.upAt = map[string]string{}
+	s.lastFast = time.Time{}
+	s.loadLocked()
+	return nil
 }
 
 func (s *Service) resultsPath() string { return filepath.Join(s.dataDir, "discovery_results.json") }
 func (s *Service) eventsPath() string  { return filepath.Join(s.dataDir, "discovery_events.jsonl") }
 
-func (s *Service) load() {
+func (s *Service) loadLocked() {
 	if data, err := os.ReadFile(s.resultsPath()); err == nil {
 		_ = json.Unmarshal(data, &s.results)
 	} else if data, err := os.ReadFile(filepath.Join(s.dataDir, "discovery_last.json")); err == nil {
@@ -385,6 +416,7 @@ func (s *Service) end() {
 
 // ScanJobs 依次运行指定的扫描任务（ids 为空表示全部任务，含未启用定时的），同步返回各任务结果。
 func (s *Service) ScanJobs(ids []string, reason string) ([]*ScanResult, error) {
+	defer s.Topo.ProfileWork()()
 	d := s.Cfg.Get().Discovery
 	var jobs []config.ScanJob
 	if len(ids) == 0 {
@@ -414,6 +446,7 @@ func (s *Service) ScanJobs(ids []string, reason string) ([]*ScanResult, error) {
 
 // ScanAdhoc 临时扫描指定网段（不保存为任务），autoAdd 决定是否自动添加新设备。
 func (s *Service) ScanAdhoc(subnets []string, autoAdd bool, reason string) (*ScanResult, error) {
+	defer s.Topo.ProfileWork()()
 	d := s.Cfg.Get().Discovery
 	subnets = trimList(subnets)
 	if len(subnets) == 0 {
@@ -714,11 +747,12 @@ func (s *Service) recordEvents(cs []Change) {
 	if len(s.events) > 500 {
 		s.events = append([]Change(nil), s.events[len(s.events)-500:]...)
 	}
+	evPath := s.eventsPath()
 	s.mu.Unlock()
-	if fi, err := os.Stat(s.eventsPath()); err == nil && fi.Size() > 5<<20 {
-		_ = os.Rename(s.eventsPath(), s.eventsPath()+".1")
+	if fi, err := os.Stat(evPath); err == nil && fi.Size() > 5<<20 {
+		_ = os.Rename(evPath, evPath+".1")
 	}
-	f, err := os.OpenFile(s.eventsPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(evPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		log.Printf("写入扫描记录失败: %v", err)
 		return
@@ -746,9 +780,11 @@ func (s *Service) save(r *ScanResult) {
 		}
 	}
 	data, _ := json.MarshalIndent(s.results, "", " ")
+	dataDir := s.dataDir
+	resPath := s.resultsPath()
 	s.mu.Unlock()
-	_ = os.MkdirAll(s.dataDir, 0o755)
-	if err := config.WriteFileAtomic(s.resultsPath(), data); err != nil {
+	_ = os.MkdirAll(dataDir, 0o755)
+	if err := config.WriteFileAtomic(resPath, data); err != nil {
 		log.Printf("保存扫描结果失败: %v", err)
 	}
 }
@@ -756,8 +792,9 @@ func (s *Service) save(r *ScanResult) {
 func (s *Service) persist() {
 	s.mu.Lock()
 	data, _ := json.MarshalIndent(s.results, "", " ")
+	resPath := s.resultsPath()
 	s.mu.Unlock()
-	_ = config.WriteFileAtomic(s.resultsPath(), data)
+	_ = config.WriteFileAtomic(resPath, data)
 }
 
 func (s *Service) added(cs []Change) {
@@ -804,6 +841,7 @@ func (s *Service) notify(r *ScanResult) {
 
 // AddUnknown 把各任务最近一次扫描中未自动添加的设备加入拓扑（按所属任务附加标签/告警）。
 func (s *Service) AddUnknown(ips []string) ([]Change, error) {
+	defer s.Topo.ProfileWork()()
 	want := map[string]bool{}
 	for _, ip := range ips {
 		want[ip] = true
@@ -923,6 +961,7 @@ func ipLess(a, b string) bool {
 
 // ApplySuggestion 手动采纳“IP 变化”建议：把节点 IP 改为 ip，ipMode 为 "-" 时不改分配方式。
 func (s *Service) ApplySuggestion(nodeID, ip, ipMode string) (Change, error) {
+	defer s.Topo.ProfileWork()()
 	var ch Change
 	err := s.Topo.Update(func(t *topology.Topology) error {
 		n := t.FindNode(nodeID)

@@ -22,6 +22,7 @@ import (
 	"netping/internal/locate"
 	"netping/internal/monitor"
 	"netping/internal/plugin"
+	"netping/internal/profiles"
 	"netping/internal/server"
 	"netping/internal/store"
 	"netping/internal/sysutil"
@@ -141,6 +142,20 @@ func main() {
 	}
 	disc.OnAdded = loc.Trigger
 
+	profMgr, err := profiles.Open(profiles.Options{
+		BaseDir: baseDir,
+		Cfg:     cfgMgr,
+		Topo:    topo,
+		Mon:     mon,
+		Store:   st,
+		Alerts:  alerts,
+		Disc:    disc,
+		Loc:     loc,
+	})
+	if err != nil {
+		fatal(err)
+	}
+
 	apply := func(t *topology.Topology) {
 		mon.Sync(monitor.BuildTargets(t, cfgMgr.Get().Ping))
 		alerts.SetTopology(t)
@@ -194,7 +209,7 @@ func main() {
 	}()
 
 	server.Version = version
-	srv := &server.Server{Cfg: cfgMgr, Topo: topo, Mon: mon, Alerts: alerts, Store: st, BaseDir: baseDir,
+	srv := &server.Server{Cfg: cfgMgr, Topo: topo, Mon: mon, Alerts: alerts, Store: st, Profiles: profMgr, BaseDir: baseDir,
 		DocsMD: docsMD, SchemaJSON: schemaJSON, Disc: disc, Loc: loc, Plugins: plugins, PluginDocMD: pluginDocMD}
 	addr, err := srv.Start()
 	if err != nil {
@@ -207,6 +222,7 @@ func main() {
 		plugins.Close()
 		srv.Close()
 		mon.Close()
+		profMgr.Shutdown()
 		log.Printf("netPing 已退出")
 	}
 

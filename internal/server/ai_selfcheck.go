@@ -368,6 +368,11 @@ func (s *Server) aiSelfCheck(ctx context.Context, c config.Config, run aiRunResu
 		return out
 	}
 	for round := 0; ; round++ {
+		if err := s.checkProfileEpoch(ctx); err != nil {
+			out.Result = "failed"
+			out.Note = err.Error()
+			return end()
+		}
 		useTools := tools
 		if round >= aiReviewRounds-1 || out.Calls >= aiReviewCalls {
 			useTools = nil
@@ -393,7 +398,13 @@ func (s *Server) aiSelfCheck(ctx context.Context, c config.Config, run aiRunResu
 		if len(msg.ToolCalls) > 0 && useTools != nil {
 			msgs = append(msgs, msg)
 			out.Calls += len(msg.ToolCalls)
-			msgs = append(msgs, s.aiExecCalls(msg.ToolCalls, remote, "review", emit)...)
+			toolMsgs, err := s.aiExecCallsInCtx(ctx, aiToolNames, msg.ToolCalls, remote, "review", emit)
+			msgs = append(msgs, toolMsgs...)
+			if err != nil {
+				out.Result = "failed"
+				out.Note = err.Error()
+				return end()
+			}
 			if g.revising {
 				emit(map[string]interface{}{"t": "break"})
 			}

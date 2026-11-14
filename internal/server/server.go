@@ -19,6 +19,7 @@ import (
 	"netping/internal/locate"
 	"netping/internal/monitor"
 	"netping/internal/plugin"
+	"netping/internal/profiles"
 	"netping/internal/store"
 	"netping/internal/topology"
 	"netping/web"
@@ -29,14 +30,15 @@ var Version = "dev"
 
 // Server 管理网页服务。
 type Server struct {
-	Cfg     *config.Manager
-	Topo    *topology.Store
-	Mon     *monitor.Monitor
-	Alerts  *alert.Engine
-	Store   *store.Store
-	Disc    *discovery.Service
-	Loc     *locate.Service
-	BaseDir string
+	Cfg      *config.Manager
+	Topo     *topology.Store
+	Mon      *monitor.Monitor
+	Alerts   *alert.Engine
+	Store    *store.Store
+	Disc     *discovery.Service
+	Loc      *locate.Service
+	Profiles *profiles.Manager
+	BaseDir  string
 	// Plugins 插件管理器（可为 nil）；PluginDocMD 为插件开发指南，网页与 MCP 资源共用。
 	Plugins     *plugin.Manager
 	PluginDocMD []byte
@@ -131,9 +133,11 @@ func (s *Server) withAuth(h http.Handler) http.Handler {
 // ---------------------------------------------------------------------------
 
 type apiError struct {
-	status   int
-	msg      string
-	problems []string
+	status        int
+	msg           string
+	code          string
+	activeProfile string
+	problems      []string
 }
 
 func (e *apiError) Error() string { return e.msg }
@@ -160,6 +164,12 @@ func writeErr(w http.ResponseWriter, err error) {
 	switch {
 	case errors.As(err, &ae):
 		status = ae.status
+		if ae.code != "" {
+			body["code"] = ae.code
+		}
+		if ae.activeProfile != "" {
+			body["active_profile"] = ae.activeProfile
+		}
 	case errors.As(err, &ve):
 		status = http.StatusBadRequest
 		body["error"] = "拓扑校验失败"
@@ -189,50 +199,86 @@ func (s *Server) routeAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	m := r.Method
 	var err error
+	if !skipProfileHeaderCheck(head, arg, m) {
+		if err := s.checkProfileHeader(r); err != nil {
+			writeErr(w, err)
+			return
+		}
+	}
 	switch {
 	case head == "meta" && m == http.MethodGet:
 		s.handleMeta(w)
+	case head == "profiles":
+		err = s.handleProfiles(w, r, arg)
+	case head == "maintenance":
+		if m != http.MethodGet {
+			defer s.Topo.ProfileWork()()
+		}
+		err = s.handleMaintenance(w, r, arg)
+	case head == "health-report" && arg == "" && m == http.MethodPost:
+		err = s.handleHealthReport(w, r)
+	case head == "reports" && arg == "health" && m == http.MethodPost:
+		err = s.handleHealthReport(w, r)
 	case head == "topology" && arg == "" && m == http.MethodGet:
 		s.handleTopology(w)
 	case head == "topology" && arg == "reload" && m == http.MethodPost:
+		defer s.Topo.ProfileWork()()
 		err = s.handleReload(w)
 	case head == "topology" && arg == "yaml" && m == http.MethodGet:
 		err = s.handleGetYAML(w, r)
 	case head == "topology" && arg == "yaml" && m == http.MethodPut:
+		defer s.Topo.ProfileWork()()
 		err = s.handlePutYAML(w, r)
 	case head == "site" && m == http.MethodPut:
+		defer s.Topo.ProfileWork()()
 		err = s.handleSite(w, r)
 	case head == "nodes" && arg == "cleanup" && m == http.MethodGet:
 		s.handleNodeCleanupPreview(w)
 	case head == "nodes" && arg == "cleanup" && m == http.MethodPost:
+		defer s.Topo.ProfileWork()()
 		err = s.handleNodeCleanup(w, r)
 	case head == "nodes" && strings.HasSuffix(arg, "/lock") && m == http.MethodPut:
+		defer s.Topo.ProfileWork()()
 		err = s.handleNodeLock(w, r, strings.TrimSuffix(arg, "/lock"))
 	case head == "nodes" && arg == "" && m == http.MethodPost:
+		defer s.Topo.ProfileWork()()
 		err = s.handleNodeSave(w, r, "")
 	case head == "nodes" && arg != "" && m == http.MethodPut:
+		defer s.Topo.ProfileWork()()
 		err = s.handleNodeSave(w, r, arg)
 	case head == "nodes" && arg != "" && m == http.MethodDelete:
+		defer s.Topo.ProfileWork()()
 		err = s.handleNodeDelete(w, arg)
 	case head == "switches" && arg == "" && m == http.MethodPost:
+		defer s.Topo.ProfileWork()()
 		err = s.handleSwitchSave(w, r, "")
 	case head == "switches" && arg != "" && m == http.MethodPut:
+		defer s.Topo.ProfileWork()()
 		err = s.handleSwitchSave(w, r, arg)
 	case head == "switches" && arg != "" && m == http.MethodDelete:
+		defer s.Topo.ProfileWork()()
 		err = s.handleSwitchDelete(w, arg)
 	case head == "links" && arg == "" && m == http.MethodPost:
+		defer s.Topo.ProfileWork()()
 		err = s.handleLinkSave(w, r, "")
 	case head == "links" && arg != "" && m == http.MethodPut:
+		defer s.Topo.ProfileWork()()
 		err = s.handleLinkSave(w, r, arg)
 	case head == "links" && arg != "" && m == http.MethodDelete:
+		defer s.Topo.ProfileWork()()
 		err = s.handleLinkDelete(w, arg)
 	case head == "positions" && m == http.MethodPost:
+		defer s.Topo.ProfileWork()()
 		err = s.handlePositions(w, r)
 	case head == "layout" && arg == "reset" && m == http.MethodPost:
+		defer s.Topo.ProfileWork()()
 		err = s.handleLayoutReset(w, r)
 	case head == "ports" && arg == "scan" && m == http.MethodPost:
 		err = s.handlePortScan(w, r)
 	case head == "ports" && arg == "monitoring" && (m == http.MethodPut || m == http.MethodGet):
+		if m == http.MethodPut {
+			defer s.Topo.ProfileWork()()
+		}
 		err = s.handleTCPMonitoring(w, r)
 	case head == "status" && m == http.MethodGet:
 		writeJSON(w, s.statusPayload())
@@ -247,6 +293,7 @@ func (s *Server) routeAPI(w http.ResponseWriter, r *http.Request) {
 	case head == "config" && m == http.MethodGet:
 		writeJSON(w, publicConfig(s.Cfg.Get()))
 	case head == "config" && m == http.MethodPut:
+		defer s.Topo.ProfileWork()()
 		err = s.handleConfig(w, r)
 	case head == "alert" && arg == "test" && m == http.MethodPost:
 		err = s.handleAlertTest(w, r)
@@ -284,6 +331,7 @@ func (s *Server) routeAPI(w http.ResponseWriter, r *http.Request) {
 	case head == "mcp" && m == http.MethodGet:
 		s.handleMCPInfo(w)
 	case head == "alerting" && m == http.MethodPost:
+		defer s.Topo.ProfileWork()()
 		err = s.handleAlerting(w, r)
 	case head == "monitor" && arg == "pause" && m == http.MethodPost:
 		err = s.handlePause(w, r)
@@ -295,20 +343,31 @@ func (s *Server) routeAPI(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func skipProfileHeaderCheck(head, arg, method string) bool {
+	if head == "auth" || head == "stream" {
+		return true
+	}
+	if method == http.MethodGet && (head == "meta" || (head == "topology" && arg == "") || (head == "profiles" && arg == "")) {
+		return true
+	}
+	return false
+}
+
 func (s *Server) handleMeta(w http.ResponseWriter) {
 	writeJSON(w, map[string]interface{}{
-		"version":      Version,
-		"started":      s.started.UnixMilli(),
-		"base_dir":     s.BaseDir,
-		"topo_file":    s.Topo.Path(),
-		"paused":       s.Mon.Paused(),
-		"schedule":     s.Cfg.Get().Schedule.Describe(),
-		"roles":        topology.Roles,
-		"device_types": topology.DeviceTypes,
-		"type_names":   topology.DeviceTypeNames,
-		"flags":        topology.KnownFlags,
-		"node_sides":   topology.NodeSides,
-		"server_time":  time.Now().UnixMilli(),
+		"version":        Version,
+		"started":        s.started.UnixMilli(),
+		"base_dir":       s.BaseDir,
+		"topo_file":      s.Topo.Path(),
+		"active_profile": s.activeProfileID(),
+		"paused":         s.Mon.Paused(),
+		"schedule":       s.Cfg.Get().Schedule.Describe(),
+		"roles":          topology.Roles,
+		"device_types":   topology.DeviceTypes,
+		"type_names":     topology.DeviceTypeNames,
+		"flags":          topology.KnownFlags,
+		"node_sides":     topology.NodeSides,
+		"server_time":    time.Now().UnixMilli(),
 	})
 }
 
