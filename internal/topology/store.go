@@ -23,12 +23,27 @@ var fileHeader string
 // Store 管理 topology.yaml：加载、校验、修改、保存，并通知订阅者。
 type Store struct {
 	notifyMu  sync.Mutex // 串行执行回调，并在轮到本次通知时读取最新快照。
+	profileMu sync.RWMutex
 	mu        sync.RWMutex
 	path      string
 	topo      *Topology
 	rev       int64
 	modTime   time.Time
 	listeners []func(*Topology)
+}
+
+// ProfileWork holds a shared read lock while a scan or locate run operates on the active profile.
+func (s *Store) ProfileWork() func() {
+	s.profileMu.RLock()
+	return s.profileMu.RUnlock
+}
+
+// TryLockProfile acquires the exclusive profile switch lock without blocking.
+func (s *Store) TryLockProfile() (func(), bool) {
+	if !s.profileMu.TryLock() {
+		return nil, false
+	}
+	return s.profileMu.Unlock, true
 }
 
 // Parse 解析 YAML 文本并补全、校验。
@@ -154,6 +169,35 @@ func (s *Store) Replace(t *Topology) error {
 		*cur = *t
 		return nil
 	})
+}
+
+// SwapActive replaces the active topology on disk and in memory without firing OnChange listeners.
+// Used during profile activation so Monitor/Alerts/Discovery/Locate switch atomically before resuming.
+func (s *Store) SwapActive(t *Topology) error {
+	if t == nil {
+		return fmt.Errorf("拓扑不能为空")
+	}
+	next := t.Clone()
+	next.Normalize()
+	if probs := next.Validate(); len(probs) > 0 {
+		return &ValidationError{Problems: probs}
+	}
+	s.mu.Lock()
+	prev := s.topo
+	s.topo = next
+	if err := s.saveLocked(); err != nil {
+		s.topo = prev
+		s.mu.Unlock()
+		return err
+	}
+	s.rev++
+	s.mu.Unlock()
+	return nil
+}
+
+// NotifyCurrent triggers registered OnChange listeners with the current topology snapshot.
+func (s *Store) NotifyCurrent() {
+	s.notify()
 }
 
 // Reload 从磁盘重新读取（文件被外部工具或 AI 修改之后）。

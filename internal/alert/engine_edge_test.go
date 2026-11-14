@@ -111,7 +111,7 @@ func TestAlertLifecycleAndEdgeCases(t *testing.T) {
 		t.Fatalf("slow recover = %v", sent)
 	}
 
-	// Suspected switch outage when all 3 children go down without switch down
+	// Without an observed switch outage, retain each child alert.
 	t1 := now.Add(40 * time.Minute)
 	e.Evaluate(t1, []monitor.Status{
 		{ID: "n1", Kind: "node", IP: "10.0.0.10", ConsecFail: 5, LossWarnPct: 20, LatencyWarnMs: 100},
@@ -119,7 +119,7 @@ func TestAlertLifecycleAndEdgeCases(t *testing.T) {
 		{ID: "n3", Kind: "node", IP: "10.0.0.12", ConsecFail: 5, LossWarnPct: 20, LatencyWarnMs: 100},
 	})
 	e.flushIfDue(t1.Add(15 * time.Second))
-	if len(sent) != 6 || !strings.Contains(sent[5], "疑似交换机 接入 故障") {
+	if len(sent) != 6 || strings.Count(sent[5], "● 离线") != 3 {
 		t.Fatalf("suspected switch outage msg = %v", sent)
 	}
 

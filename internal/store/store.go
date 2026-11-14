@@ -38,7 +38,7 @@ type Minute struct {
 // Store 历史数据存储。
 type Store struct {
 	dir string
-	mu  sync.Mutex
+	mu  sync.RWMutex
 }
 
 // New 创建存储，dir 不存在时自动创建。
@@ -47,6 +47,24 @@ func New(dir string) (*Store, error) {
 		return nil, err
 	}
 	return &Store{dir: dir}, nil
+}
+
+// Dir returns the current storage directory.
+func (s *Store) Dir() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.dir
+}
+
+// SwitchDir switches the storage directory after ensuring it exists.
+func (s *Store) SwitchDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.dir = dir
+	s.mu.Unlock()
+	return nil
 }
 
 func dayName(t time.Time) string { return t.Format("20060102") + ".bin" }
@@ -102,14 +120,17 @@ func (s *Store) Append(id string, m Minute) error {
 	return err
 }
 
-// Query 读取 [from, to) 区间（Unix 秒）的分钟记录，按时间升序。
+// Query 读取 [from, to) 区间（Unix 秒）的分钟记录，按时间升序，合并同分钟的多段记录。
 func (s *Store) Query(id string, from, to int64) ([]Minute, error) {
+	s.mu.RLock()
+	dir := s.dir
+	s.mu.RUnlock()
 	var out []Minute
 	start := time.Unix(from, 0)
 	day := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, start.Location())
 	end := time.Unix(to, 0)
 	for !day.After(end) {
-		data, err := os.ReadFile(filepath.Join(s.dir, id, dayName(day)))
+		data, err := os.ReadFile(filepath.Join(dir, id, dayName(day)))
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return nil, err
 		}
@@ -122,15 +143,44 @@ func (s *Store) Query(id string, from, to int64) ([]Minute, error) {
 		day = day.AddDate(0, 0, 1)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].T < out[j].T })
-	return out, nil
+	if len(out) <= 1 {
+		return out, nil
+	}
+	merged := make([]Minute, 0, len(out))
+	for _, m := range out {
+		if n := len(merged); n > 0 && merged[n-1].T == m.T {
+			merged[n-1] = mergeMinute(merged[n-1], m)
+			continue
+		}
+		merged = append(merged, m)
+	}
+	return merged, nil
+}
+
+func mergeMinute(a, b Minute) Minute {
+	res := Minute{T: a.T, Sent: a.Sent + b.Sent, Recv: a.Recv + b.Recv}
+	switch {
+	case a.Recv > 0 && b.Recv > 0:
+		res.Min = math.Min(a.Min, b.Min)
+		res.Max = math.Max(a.Max, b.Max)
+		res.Avg = (a.Avg*float64(a.Recv) + b.Avg*float64(b.Recv)) / float64(res.Recv)
+	case b.Recv > 0:
+		res.Min, res.Max, res.Avg = b.Min, b.Max, b.Avg
+	default:
+		res.Min, res.Max, res.Avg = a.Min, a.Max, a.Avg
+	}
+	return res
 }
 
 // Cleanup 删除超过 keepDays 天的文件，以及清理后变空的节点目录。
 func (s *Store) Cleanup(keepDays int) (removed int, err error) {
+	s.mu.Lock()
+	baseDir := s.dir
+	s.mu.Unlock()
 	now := time.Now()
 	cutoff := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).AddDate(0, 0, -keepDays)
 	cut := cutoff.Format("20060102")
-	entries, err := os.ReadDir(s.dir)
+	entries, err := os.ReadDir(baseDir)
 	if err != nil {
 		return 0, err
 	}
@@ -138,7 +188,7 @@ func (s *Store) Cleanup(keepDays int) (removed int, err error) {
 		if !e.IsDir() {
 			continue
 		}
-		dir := filepath.Join(s.dir, e.Name())
+		dir := filepath.Join(baseDir, e.Name())
 		files, err := os.ReadDir(dir)
 		if err != nil {
 			continue

@@ -209,155 +209,16 @@ func (c *Config) Normalize() {
 	if c.RetentionDays <= 0 {
 		c.RetentionDays = d.RetentionDays
 	}
-	if c.Ping.IntervalMs < 200 {
-		c.Ping.IntervalMs = d.Ping.IntervalMs
-	}
-	if c.Ping.TimeoutMs < 100 {
-		c.Ping.TimeoutMs = d.Ping.TimeoutMs
-	}
-	if c.Ping.PacketSize <= 0 || c.Ping.PacketSize > 65500 {
-		c.Ping.PacketSize = d.Ping.PacketSize
-	}
-	if c.Ping.LatencyWarnMs <= 0 {
-		c.Ping.LatencyWarnMs = d.Ping.LatencyWarnMs
-	}
-	if c.Ping.LossWarnPct <= 0 || c.Ping.LossWarnPct > 100 {
-		c.Ping.LossWarnPct = d.Ping.LossWarnPct
-	}
-	if c.Schedule.Windows == nil {
-		c.Schedule.Windows = []Window{}
-	}
-	for i := range c.Schedule.Windows {
-		w := &c.Schedule.Windows[i]
-		w.Start, w.End = strings.TrimSpace(w.Start), strings.TrimSpace(w.End)
-	}
-	a := &c.Alert
-	if a.DownAfterFailures <= 0 {
-		a.DownAfterFailures = d.Alert.DownAfterFailures
-	}
-	if a.UpAfterSuccesses <= 0 {
-		a.UpAfterSuccesses = d.Alert.UpAfterSuccesses
-	}
-	if a.LossDurationMin <= 0 {
-		a.LossDurationMin = d.Alert.LossDurationMin
-	}
-	if a.LatencyDurationMin <= 0 {
-		a.LatencyDurationMin = d.Alert.LatencyDurationMin
-	}
-	if a.RepeatIntervalMin < 0 {
-		a.RepeatIntervalMin = 0
-	}
-	if a.MergeWindowSec <= 0 {
-		a.MergeWindowSec = d.Alert.MergeWindowSec
-	}
-	if a.SiteTitle == "" {
-		a.SiteTitle = d.Alert.SiteTitle
-	}
-	a.WebhookURL = strings.TrimSpace(a.WebhookURL)
-	a.DingTalkURL = strings.TrimSpace(a.DingTalkURL)
-	a.DingTalkSecret = strings.TrimSpace(a.DingTalkSecret)
-	a.FeishuURL = strings.TrimSpace(a.FeishuURL)
-	a.FeishuSecret = strings.TrimSpace(a.FeishuSecret)
-	a.SlackURL = strings.TrimSpace(a.SlackURL)
-	a.GenericWebhookURL = strings.TrimSpace(a.GenericWebhookURL)
-
 	c.MCP.Token = strings.TrimSpace(c.MCP.Token)
-	dd := &c.Discovery
-	if dd.Jobs == nil { // 旧版配置或首次运行
-		j := DefaultJob()
-		if len(dd.LegacySubnets) > 0 {
-			j.Subnets = dd.LegacySubnets
-		}
-		if dd.LegacyInterval > 0 {
-			j.IntervalMin = dd.LegacyInterval
-		}
-		if dd.LegacyAutoAdd != nil {
-			j.AutoAdd = *dd.LegacyAutoAdd
-		}
-		dd.Jobs = []ScanJob{j}
-	}
-	dd.LegacySubnets, dd.LegacyInterval, dd.LegacyAutoAdd = nil, 0, nil
-	usedID := map[string]bool{}
-	for i := range dd.Jobs {
-		j := &dd.Jobs[i]
-		j.ID = strings.TrimSpace(j.ID)
-		j.Name = strings.TrimSpace(j.Name)
-		j.Subnets = cleanList(j.Subnets)
-		j.Tags = cleanList(j.Tags)
-		if j.IntervalMin <= 0 {
-			j.IntervalMin = 30
-		}
-		if j.ID == "" {
-			for n := i + 1; ; n++ {
-				if id := fmt.Sprintf("job-%d", n); !usedID[id] {
-					j.ID = id
-					break
-				}
-			}
-		}
-		usedID[j.ID] = true
-		if j.Name == "" {
-			if len(j.Subnets) > 0 {
-				j.Name = strings.Join(j.Subnets, "、")
-			} else {
-				j.Name = "机房网段"
-			}
-		}
-	}
-	if dd.TimeoutMs < 100 {
-		dd.TimeoutMs = d.Discovery.TimeoutMs
-	}
-	if dd.Concurrency <= 0 || dd.Concurrency > 256 {
-		dd.Concurrency = d.Discovery.Concurrency
-	}
-	if dd.IPTracking == "" {
-		dd.IPTracking = "all"
-	}
-	dd.Exclude = cleanList(dd.Exclude)
-	lc := &c.Locate
-	if lc.IntervalMin <= 0 {
-		lc.IntervalMin = d.Locate.IntervalMin
-	}
-	if lc.TimeoutMs < 200 {
-		lc.TimeoutMs = d.Locate.TimeoutMs
-	}
-	lc.Community = strings.TrimSpace(lc.Community)
-	if lc.Switches == nil {
-		lc.Switches = map[string]LocateSwitch{}
-	}
-	for k, v := range lc.Switches {
-		v.Host, v.Community = strings.TrimSpace(v.Host), strings.TrimSpace(v.Community)
-		if v == (LocateSwitch{}) {
-			delete(lc.Switches, k)
-			continue
-		}
-		lc.Switches[k] = v
-	}
-	if dd.OUI == nil {
-		dd.OUI = map[string]string{}
-	}
-	a.ProxyURL = strings.TrimSpace(a.ProxyURL)
+	rs := c.RoomSettings()
+	rs.Normalize()
+	c.ApplyRoomSettings(rs)
 }
 
 // Validate 检查用户提交的配置。
 func (c *Config) Validate() error {
-	if err := c.Alert.ValidateChannels(); err != nil {
+	if err := c.RoomSettings().Validate(); err != nil {
 		return err
-	}
-	if err := c.Schedule.Validate(); err != nil {
-		return err
-	}
-	if err := c.Discovery.Validate(); err != nil {
-		return err
-	}
-	if c.Locate.IntervalMin < 2 {
-		return errors.New("端口定位间隔不能小于 2 分钟")
-	}
-	if c.Alert.ProxyURL != "" {
-		u, err := url.Parse(c.Alert.ProxyURL)
-		if err != nil || u.Host == "" {
-			return errors.New("proxy_url 不是有效的代理地址")
-		}
 	}
 	if c.AI.ProxyURL != "" {
 		u, err := url.Parse(c.AI.ProxyURL)
@@ -546,11 +407,16 @@ func (m *Manager) save(cfg Config) error {
 
 // WriteFileAtomic 先写临时文件再改名，避免写一半时断电导致文件损坏。
 func WriteFileAtomic(path string, data []byte) error {
+	return WriteFileAtomicMode(path, data, 0o644)
+}
+
+// WriteFileAtomicMode atomically writes data to path with the given file permissions.
+func WriteFileAtomicMode(path string, data []byte, perm os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := os.WriteFile(tmp, data, perm); err != nil {
 		return err
 	}
 	// Windows 上 os.Rename 会覆盖已存在的目标文件（MoveFileEx + REPLACE_EXISTING）。
