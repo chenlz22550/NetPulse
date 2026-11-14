@@ -315,6 +315,7 @@
     const n = c.node;
     const st = ctx.status(n.id);
     const lt = latText(st, n);
+    const ssh = st && st.ssh_open && n.ip && !(n.monitor && n.monitor.enabled === false) && ['ok', 'slow', 'loss'].includes(st.state);
     const flags = n.flags || [];
     const cls = ['card'];
     if (flags.includes('gateway')) cls.push('gateway');
@@ -335,8 +336,9 @@
     s += `<text class="vendor" x="${CARD_W - 7}" y="15" text-anchor="end">${esc(right)}</text>`;
     s += `<text class="mac" x="12" y="32">${esc(n.mac || 'MAC 未记录')}</text>`;
     s += `<text class="lat ${lt.c}" x="${CARD_W - 7}" y="32" text-anchor="end">${esc(lt.t)}</text>`;
+    if (ssh) s += `<g class="node-ssh" data-ssh="${esc(n.id)}" role="button" tabindex="0" aria-label="打开 SSH 终端"><rect x="${CARD_W - 44}" y="-12" width="40" height="14" rx="3"/><text x="${CARD_W - 24}" y="-1" text-anchor="middle">SSH</text><title>打开 SSH 终端 · 端口 22</title></g>`;
     // 标记标签（最右侧为“告警”）
-    let tx = CARD_W - 4;
+    let tx = CARD_W - (ssh ? 47 : 4);
     if (n.monitor && n.monitor.alert) {
       tx -= 28;
       s += `<rect class="tag-bg al" x="${tx}" y="-9" width="28" height="13"/><text class="tag" x="${tx + 14}" y="1" text-anchor="middle">告警</text>`;
@@ -668,7 +670,18 @@
         this.zoomAt(Math.exp(-ev.deltaY * 0.0015), ev.clientX - r.left, ev.clientY - r.top);
       }, { passive: false });
 
+      const openSSH = ev => {
+        const button = ev.target.closest('[data-ssh]');
+        if (!button) return;
+        ev.preventDefault(); ev.stopPropagation();
+        if (this.opts.onSSH) this.opts.onSSH(button.dataset.ssh);
+      };
+      svg.addEventListener('click', openSSH);
+      svg.addEventListener('keydown', ev => {
+        if (ev.key === 'Enter' || ev.key === ' ') openSSH(ev);
+      });
       svg.addEventListener('pointerdown', ev => {
+        if (ev.target.closest('[data-ssh]')) { ev.stopPropagation(); return; }
         if (ev.button !== 0) return;
         const el = ev.target.closest('[data-kind]');
         const kind = el ? el.getAttribute('data-kind') : 'bg';

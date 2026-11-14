@@ -138,16 +138,35 @@ func (s *Server) checkSSHHost(address, fingerprint string, accept bool) (bool, e
 }
 
 func (s *Server) handleSSH(w http.ResponseWriter, r *http.Request, id string) error {
-	if !terminalOrigin(r) {
-		return &apiError{status: 403, msg: "终端仅允许从当前网站连接"}
-	}
-	if !websocket.IsWebSocketUpgrade(r) {
-		return badRequest("请从端口定位页面打开 SSH 终端")
-	}
 	host, err := s.switchTerminalHost(id)
 	if err != nil {
 		return err
 	}
+	return s.handleSSHHost(w, r, host)
+}
+
+func (s *Server) handleNodeSSH(w http.ResponseWriter, r *http.Request, id string) error {
+	topo, _ := s.Topo.Snapshot()
+	for _, n := range topo.Nodes {
+		if n.ID == id {
+			host := strings.TrimSpace(n.IP)
+			if host == "" {
+				return badRequest("节点未设置 IP")
+			}
+			return s.handleSSHHost(w, r, host)
+		}
+	}
+	return notFound("节点")
+}
+
+func (s *Server) handleSSHHost(w http.ResponseWriter, r *http.Request, host string) error {
+	if !terminalOrigin(r) {
+		return &apiError{status: 403, msg: "终端仅允许从当前网站连接"}
+	}
+	if !websocket.IsWebSocketUpgrade(r) {
+		return badRequest("请从设备的 SSH 按钮打开终端")
+	}
+	var err error
 	port := 22
 	if p := r.URL.Query().Get("port"); p != "" {
 		port, err = strconv.Atoi(p)

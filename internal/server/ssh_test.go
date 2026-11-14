@@ -387,3 +387,46 @@ func TestSSHHostKeyChangedAndCorruption(t *testing.T) {
 		t.Fatal("corrupt host file accepted")
 	}
 }
+
+func TestNodeSSH(t *testing.T) {
+	s, ts := newTestServer(t)
+	address, fingerprint := startSSHDevice(t)
+	host, port, _ := net.SplitHostPort(address)
+	apiRequest(t, ts, "POST", "/api/nodes", `{"id":"ssh-node","ip":"`+host+`"}`, 200)
+	// A conflicting switch override must never redirect a node connection.
+	cfg := s.Cfg.Get()
+	cfg.Locate.Switches = map[string]config.LocateSwitch{"ssh-node": {Host: "192.0.2.1"}}
+	if err := s.Cfg.Update(cfg); err != nil {
+		t.Fatal(err)
+	}
+	ws, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(ts.URL, "http")+"/api/ssh/nodes/ssh-node?port="+port, sshHeaders(ts))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.Close()
+	ws.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if err := ws.WriteJSON(sshMessage{Type: "auth", Username: "admin", Password: "device-password", Cols: 80, Rows: 24}); err != nil {
+		t.Fatal(err)
+	}
+	if got := sshStatus(t, ws, "hostkey")["fingerprint"]; got != fingerprint {
+		t.Fatal(got)
+	}
+	if err := ws.WriteJSON(sshMessage{Type: "trust", Fingerprint: fingerprint}); err != nil {
+		t.Fatal(err)
+	}
+	sshStatus(t, ws, "connected")
+	if err := ws.WriteJSON(sshMessage{Type: "input", Data: "node-terminal\r"}); err != nil {
+		t.Fatal(err)
+	}
+	output := ""
+	for !strings.Contains(output, "node-terminal") {
+		typ, b, err := ws.ReadMessage()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if typ == websocket.BinaryMessage {
+			output += string(b)
+		}
+	}
+	apiRequest(t, ts, "GET", "/api/ssh/nodes/missing", "", 404)
+}

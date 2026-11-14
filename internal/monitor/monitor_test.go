@@ -112,3 +112,31 @@ func TestPauseReason(t *testing.T) {
 		t.Fatal("manual pause takes precedence")
 	}
 }
+
+func TestSSHAvailabilityFollowsNodeStateAndAddress(t *testing.T) {
+	m := New(nil, nil)
+	defer m.Close()
+	target := Target{ID: "node", Kind: "node", IP: "192.0.2.1", Interval: time.Second, LatencyWarnMs: 100, LossWarnPct: 20}
+	w := newWorker(target, m)
+	w.record(time.Now(), pinger.Result{OK: true, RTT: time.Millisecond})
+	w.sshOpen = true
+	w.sshChecked = time.Now()
+	if !w.status(false).SSHOpen {
+		t.Fatal("online node lost SSH availability")
+	}
+	m.SetPaused(true)
+	if w.status(false).SSHOpen {
+		t.Fatal("paused node exposes SSH")
+	}
+	m.SetPaused(false)
+	w.record(time.Now(), pinger.Result{OK: false})
+	if w.status(false).SSHOpen {
+		t.Fatal("unreachable node exposes SSH")
+	}
+	w.record(time.Now(), pinger.Result{OK: true, RTT: time.Millisecond})
+	target.IP = "192.0.2.2"
+	w.setTarget(target)
+	if w.status(false).SSHOpen || !w.sshChecked.IsZero() {
+		t.Fatal("address change reused old port result")
+	}
+}

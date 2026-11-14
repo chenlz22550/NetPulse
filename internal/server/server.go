@@ -248,6 +248,8 @@ func (s *Server) routeAPI(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, s.locateStatus())
 	case head == "locate" && strings.HasPrefix(arg, "telnet/") && m == http.MethodGet:
 		err = s.handleTelnet(w, r, strings.TrimPrefix(arg, "telnet/"))
+	case head == "ssh" && strings.HasPrefix(arg, "nodes/") && m == http.MethodGet:
+		err = s.handleNodeSSH(w, r, strings.TrimPrefix(arg, "nodes/"))
 	case head == "locate" && strings.HasPrefix(arg, "ssh/") && m == http.MethodGet:
 		err = s.handleSSH(w, r, strings.TrimPrefix(arg, "ssh/"))
 	case head == "locate" && strings.HasPrefix(arg, "ssh-upload/") && m == http.MethodPost:
