@@ -31,16 +31,19 @@ const (
 
 // Event 一条告警事件。
 type Event struct {
-	Time     time.Time `json:"time"`
-	Type     string    `json:"type"`
-	TargetID string    `json:"target_id"`
-	Kind     string    `json:"kind"`
-	Name     string    `json:"name"`
-	IP       string    `json:"ip"`
-	Location string    `json:"location"`
-	Detail   string    `json:"detail"`
-	Sent     bool      `json:"sent"`
-	Error    string    `json:"error,omitempty"`
+	Time          time.Time `json:"time"`
+	Type          string    `json:"type"`
+	TargetID      string    `json:"target_id"`
+	Kind          string    `json:"kind"`
+	Name          string    `json:"name"`
+	IP            string    `json:"ip"`
+	Location      string    `json:"location"`
+	Detail        string    `json:"detail"`
+	Sent          bool      `json:"sent"`
+	Error         string    `json:"error,omitempty"`
+	Suppressed    string    `json:"suppressed,omitempty"`
+	MaintenanceID string    `json:"maintenance_id,omitempty"`
+	RootCauseID   string    `json:"root_cause_id,omitempty"`
 }
 
 // targetInfo 来自拓扑的展示信息。
@@ -54,6 +57,7 @@ type targetInfo struct {
 }
 
 type tstate struct {
+	maintenance    bool
 	down           bool
 	downSince      time.Time
 	lastDownNotify time.Time
@@ -73,11 +77,15 @@ type Engine struct {
 	// HoldDown 返回 true 时暂缓该设备的离线告警（网段扫描正在重新解析其 IP）。
 	HoldDown func(id string) bool
 
-	mu       sync.Mutex
-	cfg      func() config.Config
-	mon      *monitor.Monitor
-	send     Sender
-	histPath string
+	opMu           sync.Mutex // serializes sends and profile switches
+	maintenanceErr error
+	observedDown   map[string]bool
+	maintenance    []MaintenanceWindow
+	mu             sync.Mutex
+	cfg            func() config.Config
+	mon            *monitor.Monitor
+	send           Sender
+	histPath       string
 
 	site       string
 	info       map[string]targetInfo
@@ -102,6 +110,10 @@ func NewEngine(cfg func() config.Config, mon *monitor.Monitor, histPath string) 
 		states:   map[string]*tstate{},
 	}
 	e.loadHistory()
+	if err := e.loadMaintenanceLocked(); err != nil {
+		e.maintenanceErr = err
+		log.Printf("维护窗口文件损坏，告警进入静默保护：%v", err)
+	}
 	return e
 }
 
@@ -175,7 +187,9 @@ func (e *Engine) Run(stop <-chan struct{}) {
 			if e.mon.Paused() {
 				continue
 			}
-			e.Evaluate(now, append(e.mon.Statuses(false), e.mon.TCPStatuses(false)...))
+			e.opMu.Lock()
+			e.evaluate(now, append(e.mon.Statuses(false), e.mon.TCPStatuses(false)...))
+			e.opMu.Unlock()
 			e.flushIfDue(now)
 		}
 	}
@@ -183,9 +197,21 @@ func (e *Engine) Run(stop <-chan struct{}) {
 
 // Evaluate 根据当前状态产生事件（加入待发送队列）。
 func (e *Engine) Evaluate(now time.Time, statuses []monitor.Status) {
+	e.opMu.Lock()
+	defer e.opMu.Unlock()
+	e.evaluate(now, statuses)
+}
+func (e *Engine) evaluate(now time.Time, statuses []monitor.Status) {
 	c := e.cfg().Alert
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.drainMaintenanceLocked(now)
+	e.observedDown = map[string]bool{}
+	for _, st := range statuses {
+		if st.ConsecFail >= c.DownAfterFailures && !(e.HoldDown != nil && e.HoldDown(st.ID)) {
+			e.observedDown[st.ID] = true
+		}
+	}
 	seen := map[string]bool{}
 	repeat := time.Duration(c.RepeatIntervalMin) * time.Minute
 	for _, st := range statuses {
@@ -195,10 +221,23 @@ func (e *Engine) Evaluate(now time.Time, statuses []monitor.Status) {
 		}
 		seen[st.ID] = true
 		ts := e.states[st.ID]
+		muted := e.maintenanceIDLocked(st.ID, st.ParentID, now) != ""
+		if ts != nil && ts.maintenance && !muted {
+			if st.ConsecFail >= c.DownAfterFailures {
+				ts.down = false
+			}
+			if st.Sent1m >= 10 && st.Loss1m >= st.LossWarnPct {
+				ts.lossAlerted = false
+			}
+			if st.Avg1m > 0 && st.Avg1m >= st.LatencyWarnMs {
+				ts.slowAlerted = false
+			}
+		}
 		if ts == nil {
 			ts = &tstate{}
 			e.states[st.ID] = ts
 		}
+		ts.maintenance = muted
 		// ---- 离线 / 恢复 ----
 		switch {
 		case !ts.down && st.ConsecFail >= c.DownAfterFailures && !(e.HoldDown != nil && e.HoldDown(st.ID)):
@@ -262,6 +301,12 @@ func (e *Engine) sustain(now time.Time, st monitor.Status, on bool, since time.T
 func (e *Engine) push(now time.Time, typ string, st monitor.Status, detail string) {
 	inf := e.info[st.ID]
 	ev := Event{Time: now, Type: typ, TargetID: st.ID, Kind: st.Kind, Name: inf.Name, IP: st.IP, Location: inf.Location, Detail: detail}
+	ev.RootCauseID = e.offlineAncestorLocked(ev)
+	if id := e.maintenanceIDLocked(st.ID, st.ParentID, now); id != "" {
+		ev.Suppressed, ev.MaintenanceID = "maintenance", id
+		e.appendHistoryLocked([]Event{ev})
+		return
+	}
 	if len(e.pending) == 0 {
 		e.firstPend = now
 	}
@@ -269,6 +314,8 @@ func (e *Engine) push(now time.Time, typ string, st monitor.Status, detail strin
 }
 
 func (e *Engine) flushIfDue(now time.Time) {
+	e.opMu.Lock()
+	defer e.opMu.Unlock()
 	cfg := e.cfg().Alert
 	e.mu.Lock()
 	if len(e.pending) == 0 || now.Sub(e.firstPend) < time.Duration(cfg.MergeWindowSec)*time.Second {
@@ -277,7 +324,18 @@ func (e *Engine) flushIfDue(now time.Time) {
 	}
 	evs := e.pending
 	e.pending = nil
-	content, toSend := e.composeLocked(evs, cfg)
+	var sendEvents []Event
+	for i := range evs {
+		if id := e.maintenanceIDLocked(evs[i].TargetID, "", now); id != "" {
+			evs[i].Suppressed, evs[i].MaintenanceID = "maintenance", id
+		} else {
+			sendEvents = append(sendEvents, evs[i])
+		}
+	}
+	content, toSend := e.composeLocked(sendEvents, cfg)
+	for i := range evs {
+		evs[i].RootCauseID = e.offlineAncestorLocked(evs[i])
+	}
 	e.mu.Unlock()
 
 	var sendErr error
@@ -288,8 +346,8 @@ func (e *Engine) flushIfDue(now time.Time) {
 		}
 	}
 	for i := range evs {
-		evs[i].Sent = cfg.Enabled && toSend > 0 && sendErr == nil
-		if sendErr != nil {
+		evs[i].Sent = cfg.Enabled && toSend > 0 && sendErr == nil && evs[i].Suppressed == "" && (!isRecovery(evs[i].Type) || cfg.SendRecovery)
+		if sendErr != nil && evs[i].Suppressed == "" {
 			evs[i].Error = sendErr.Error()
 		}
 	}
@@ -310,42 +368,30 @@ func isRecovery(t string) bool { return t == EvRecover || t == EvLossRecover || 
 
 // composeLocked 生成 markdown 消息，并做上游交换机故障合并/抑制。返回内容和有效条数。
 func (e *Engine) composeLocked(evs []Event, cfg config.AlertConfig) (string, int) {
-	// 按交换机归并离线事件。
-	downBySwitch := map[string][]int{}
+	groups := map[string][]int{}
 	switchDown := map[string]bool{}
 	for i, ev := range evs {
-		if ev.Type != EvDown {
-			continue
-		}
-		if ev.Kind == "switch" {
+		if ev.Kind == "switch" && (ev.Type == EvDown || ev.Type == EvStillDown) {
 			switchDown[ev.TargetID] = true
 		}
-		if p := e.info[ev.TargetID].Parent; p != "" && ev.Kind == "node" {
-			downBySwitch[p] = append(downBySwitch[p], i)
+		if root := e.offlineAncestorLocked(ev); root != "" {
+			groups[root] = append(groups[root], i)
 		}
 	}
 	skip := map[int]bool{}
 	var summary []string
-	swIDs := make([]string, 0, len(downBySwitch))
-	for id := range downBySwitch {
-		swIDs = append(swIDs, id)
+	var roots []string
+	for root := range groups {
+		roots = append(roots, root)
 	}
-	sort.Strings(swIDs)
-	for _, sw := range swIDs {
-		idx := downBySwitch[sw]
-		total := e.children[sw]
-		already := e.states[sw] != nil && e.states[sw].down && !switchDown[sw]
-		name := e.switchName[sw]
-		switch {
-		case switchDown[sw]:
-			summary = append(summary, fmt.Sprintf("**交换机 %s 不可达**，下挂 %d 台中 %d 台同时离线", name, total, len(idx)))
-		case already:
-			summary = append(summary, fmt.Sprintf("交换机 %s 已处于离线状态，另有 %d 台下挂设备离线（已合并）", name, len(idx)))
-		case len(idx) >= 3 && len(idx) == total:
-			summary = append(summary, fmt.Sprintf("**疑似交换机 %s 故障或上联中断**：下挂 %d 台全部离线", name, total))
-		default:
-			continue
+	sort.Strings(roots)
+	for _, root := range roots {
+		idx := groups[root]
+		text := fmt.Sprintf("交换机 %s 已处于离线状态，另有 %d 台下挂设备离线（已合并）", e.switchName[root], len(idx))
+		if switchDown[root] {
+			text = fmt.Sprintf("**交换机 %s 不可达**，下挂 %d 台同时离线（含级联，已合并）", e.switchName[root], len(idx))
 		}
+		summary = append(summary, text)
 		for _, i := range idx {
 			skip[i] = true
 		}
@@ -402,6 +448,8 @@ func (e *Engine) composeLocked(evs []Event, cfg config.AlertConfig) (string, int
 
 // SendTest 发送一条测试消息。
 func (e *Engine) SendTest(cfg config.AlertConfig) error {
+	e.opMu.Lock()
+	defer e.opMu.Unlock()
 	e.mu.Lock()
 	site := e.site
 	e.mu.Unlock()
@@ -447,11 +495,15 @@ func (e *Engine) ActiveDown() []string {
 
 func (e *Engine) appendHistory(evs []Event) {
 	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.appendHistoryLocked(evs)
+}
+
+func (e *Engine) appendHistoryLocked(evs []Event) {
 	e.history = append(e.history, evs...)
 	if len(e.history) > historyKeep {
 		e.history = append([]Event(nil), e.history[len(e.history)-historyKeep:]...)
 	}
-	e.mu.Unlock()
 	if e.histPath == "" {
 		return
 	}

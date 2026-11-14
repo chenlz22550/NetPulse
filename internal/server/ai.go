@@ -471,10 +471,14 @@ func (s *Server) aiLoop(ctx context.Context, c config.Config, msgs []llm.Message
 
 // aiLoopWith 同 aiLoop，可指定允许的工具和工具调用次数上限。
 func (s *Server) aiLoopWith(ctx context.Context, c config.Config, msgs []llm.Message, names []string, maxRounds, maxCalls, maxTokens int, remote string, emit func(map[string]interface{})) (aiRunResult, error) {
+	ctx = s.withProfileEpoch(ctx)
 	cl := s.aiClient(c)
 	tools := aiToolsOf(names)
 	var res aiRunResult
 	for round := 0; ; round++ {
+		if err := s.checkProfileEpoch(ctx); err != nil {
+			return res, err
+		}
 		if round > 0 {
 			emit(map[string]interface{}{"t": "status", "text": "正在分析…"})
 		} else {
@@ -494,13 +498,20 @@ func (s *Server) aiLoopWith(ctx context.Context, c config.Config, msgs []llm.Mes
 			}
 			return res, err
 		}
+		if err := s.checkProfileEpoch(ctx); err != nil {
+			return res, err
+		}
 		if len(msg.ToolCalls) == 0 || useTools == nil {
 			res.Final, res.Msgs = msg.Content, msgs
 			return res, nil
 		}
 		msgs = append(msgs, msg)
 		res.Calls += len(msg.ToolCalls)
-		msgs = append(msgs, s.aiExecCallsIn(names, msg.ToolCalls, remote, "", emit)...)
+		toolMsgs, err := s.aiExecCallsInCtx(ctx, names, msg.ToolCalls, remote, "", emit)
+		msgs = append(msgs, toolMsgs...)
+		if err != nil {
+			return res, err
+		}
 		emit(map[string]interface{}{"t": "break"})
 	}
 }
@@ -511,8 +522,16 @@ func (s *Server) aiExecCalls(calls []llm.ToolCall, remote, phase string, emit fu
 }
 
 func (s *Server) aiExecCallsIn(names []string, calls []llm.ToolCall, remote, phase string, emit func(map[string]interface{})) []llm.Message {
+	out, _ := s.aiExecCallsInCtx(context.Background(), names, calls, remote, phase, emit)
+	return out
+}
+
+func (s *Server) aiExecCallsInCtx(ctx context.Context, names []string, calls []llm.ToolCall, remote, phase string, emit func(map[string]interface{})) ([]llm.Message, error) {
 	out := make([]llm.Message, 0, len(calls))
 	for _, tc := range calls {
+		if err := s.checkProfileEpoch(ctx); err != nil {
+			return out, err
+		}
 		title, result := s.runAIToolIn(names, tc.Function.Name, tc.Function.Arguments, remote)
 		ev := map[string]interface{}{"t": "tool", "name": tc.Function.Name, "title": title, "args": truncRunes(tc.Function.Arguments, 300)}
 		if phase != "" {
@@ -521,5 +540,5 @@ func (s *Server) aiExecCallsIn(names []string, calls []llm.ToolCall, remote, pha
 		emit(ev)
 		out = append(out, llm.Message{Role: "tool", ToolCallID: tc.ID, Content: result})
 	}
-	return out
+	return out, nil
 }
