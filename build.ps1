@@ -9,5 +9,5 @@ New-Item -ItemType Directory -Force dist | Out-Null
 & $Go test ./...
 $env:GOOS = "windows"; $env:GOARCH = "amd64"; $env:CGO_ENABLED = "0"
 & $Go build -trimpath -ldflags "-H windowsgui -s -w -X main.version=$Version" -o dist/netPing.exe .
-Copy-Item docs/topology-fields.md, schema/topology.schema.json dist/
+Copy-Item docs/topology-fields.md, docs/plugin-development.md, schema/topology.schema.json dist/
 Write-Host "已生成 dist/netPing.exe"

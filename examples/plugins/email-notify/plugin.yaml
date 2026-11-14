@@ -1,0 +1,46 @@
+# netPing 示例插件（Python）：把告警等通知用邮件发出去。
+# 安装：把本目录复制到 <数据目录>/plugins/email-notify/，在网页「插件」页重新扫描、填写设置并启用。
+# 运行 netPing 的电脑需要安装 Python 3.6+（Windows 上命令名通常是 python，macOS / Linux 上改成 python3）。
+id: email-notify
+name: 邮件通知
+version: 1.0.0
+description: 通过 SMTP 把告警、扫描发现、端口定位通知发到邮箱。
+author: netPing
+api_version: 1
+command: ["python", "main.py"]
+timeout_sec: 30
+hooks: [notify]
+settings:
+  - key: smtp_host
+    label: SMTP 服务器
+    required: true
+    help: 如 smtp.qq.com、smtp.exmail.qq.com、smtp.163.com
+  - key: smtp_port
+    label: 端口
+    type: number
+    default: 465
+    help: 465（SSL）或 587（STARTTLS）或 25（不加密）
+  - key: security
+    label: 加密方式
+    type: select
+    options: [ssl, starttls, none]
+    default: ssl
+    required: true
+  - key: username
+    label: 登录账号
+    help: 一般是完整的邮箱地址；服务器不需要登录时留空
+  - key: password
+    label: 密码 / 授权码
+    type: secret
+    help: QQ、163 等邮箱需要在邮箱设置里生成“授权码”
+  - key: from_addr
+    label: 发件人地址
+    help: 留空使用登录账号
+  - key: to_addrs
+    label: 收件人
+    type: text
+    required: true
+    help: 多个收件人用逗号或换行分隔
+  - key: subject_prefix
+    label: 主题前缀
+    default: "[netPing]"

@@ -250,7 +250,7 @@ func (s *Server) mcpDispatch(m rpcMsg, remote string) (interface{}, *rpcError) {
 			}
 		}
 		if tool == nil {
-			if findTool(p.Name) != nil {
+			if s.lookupTool(p.Name) != nil {
 				return toolError("MCP 当前为只读模式，不能调用 " + p.Name + "（可在网页「MCP」页关闭只读）"), nil
 			}
 			return nil, &rpcError{Code: -32602, Message: "未知工具: " + p.Name}
@@ -347,6 +347,12 @@ func (s *Server) visibleTools() []*mcpTool {
 	ro := s.Cfg.Get().MCP.ReadOnly
 	var out []*mcpTool
 	for _, t := range mcpTools {
+		if ro && t.Write {
+			continue
+		}
+		out = append(out, t)
+	}
+	for _, t := range s.pluginTools() {
 		if ro && t.Write {
 			continue
 		}
@@ -1681,6 +1687,9 @@ func (s *Server) mcpResources() []mcpResource {
 		{"netping://schema/topology.schema.json", "topology.schema.json", "拓扑 JSON Schema", "topology.yaml 的 JSON Schema", "application/schema+json", func() (string, error) {
 			return string(s.SchemaJSON), nil
 		}},
+		{"netping://docs/plugin-development.md", "plugin-development.md", "插件开发指南", "netPing 插件的目录结构、plugin.yaml 清单、标准输入输出 JSON 协议、各钩子的数据格式与示例，可据此编写插件", "text/markdown", func() (string, error) {
+			return string(s.PluginDocMD), nil
+		}},
 		{"netping://status", "status", "实时状态", "所有设备的实时状态（与 list_devices 相同的数据）", "application/json", func() (string, error) {
 			t, _ := s.Topo.Snapshot()
 			b, err := json.MarshalIndent(buildRows(t, s.statusMap()), "", "  ")
@@ -1786,6 +1795,9 @@ func (s *Server) handleMCPInfo(w http.ResponseWriter) {
 	var tools []map[string]interface{}
 	for _, t := range mcpTools {
 		tools = append(tools, map[string]interface{}{"name": t.Name, "title": t.Title, "description": t.Description, "write": t.Write, "destructive": t.Destructive, "probe": t.OpenWorld || probeToolNames[t.Name]})
+	}
+	for _, t := range s.pluginTools() {
+		tools = append(tools, map[string]interface{}{"name": t.Name, "title": t.Title, "description": t.Description, "write": t.Write, "destructive": false, "probe": !t.Write, "plugin": true})
 	}
 	var prompts []map[string]interface{}
 	for _, p := range mcpPrompts {

@@ -96,6 +96,17 @@ func aiToolsOf(names []string) []llm.Tool {
 	return out
 }
 
+// aiToolDefs 同 aiToolsOf，但也包含已启用插件的工具。
+func (s *Server) aiToolDefs(names []string) []llm.Tool {
+	var out []llm.Tool
+	for _, name := range names {
+		if t := s.lookupTool(name); t != nil && !t.Write {
+			out = append(out, llm.Tool{Type: "function", Function: llm.ToolFunction{Name: t.Name, Description: t.Description, Parameters: t.Schema}})
+		}
+	}
+	return out
+}
+
 func aiAllowed(name string) bool { return inList(aiToolNames, name) }
 
 func inList(list []string, name string) bool {
@@ -138,7 +149,7 @@ func (s *Server) runAITool(name, args, remote string) (string, string) {
 
 // runAIToolIn 执行模型发起的工具调用，只允许 allowed 中的只读工具。
 func (s *Server) runAIToolIn(allowed []string, name, args, remote string) (string, string) {
-	t := findTool(name)
+	t := s.lookupTool(name)
 	if t == nil || !inList(allowed, name) || t.Write {
 		return "", `{"error":"不允许调用该工具"}`
 	}
@@ -466,13 +477,13 @@ type aiRunResult struct {
 
 // aiLoop 与模型多轮对话：模型可调用只读工具，直到给出不含工具调用的回复或达到轮数上限。
 func (s *Server) aiLoop(ctx context.Context, c config.Config, msgs []llm.Message, maxRounds, maxTokens int, remote string, emit func(map[string]interface{})) (aiRunResult, error) {
-	return s.aiLoopWith(ctx, c, msgs, aiToolNames, maxRounds, aiMaxToolCalls, maxTokens, remote, emit)
+	return s.aiLoopWith(ctx, c, msgs, s.aiDiagnoseNames(), maxRounds, aiMaxToolCalls, maxTokens, remote, emit)
 }
 
 // aiLoopWith 同 aiLoop，可指定允许的工具和工具调用次数上限。
 func (s *Server) aiLoopWith(ctx context.Context, c config.Config, msgs []llm.Message, names []string, maxRounds, maxCalls, maxTokens int, remote string, emit func(map[string]interface{})) (aiRunResult, error) {
 	cl := s.aiClient(c)
-	tools := aiToolsOf(names)
+	tools := s.aiToolDefs(names)
 	var res aiRunResult
 	for round := 0; ; round++ {
 		if round > 0 {

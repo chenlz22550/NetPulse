@@ -3,6 +3,7 @@ package main
 
 import (
 	_ "embed"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -20,6 +21,7 @@ import (
 	"netping/internal/discovery"
 	"netping/internal/locate"
 	"netping/internal/monitor"
+	"netping/internal/plugin"
 	"netping/internal/server"
 	"netping/internal/store"
 	"netping/internal/sysutil"
@@ -27,10 +29,13 @@ import (
 	"netping/internal/tray"
 )
 
-var version = "1.4.0"
+var version = "1.5.0"
 
 //go:embed docs/topology-fields.md
 var docsMD []byte
+
+//go:embed docs/plugin-development.md
+var pluginDocMD []byte
 
 //go:embed schema/topology.schema.json
 var schemaJSON []byte
@@ -88,11 +93,27 @@ func main() {
 	mon.SetSchedule(func() bool { return cfgMgr.Get().Schedule.Active(time.Now()) })
 	alerts := alert.NewEngine(cfgMgr.Get, mon, filepath.Join(dataDir, "alerts.jsonl"))
 
+	// 插件：数据目录下 plugins/<id>/，默认全部未启用，在网页「插件」页启用。
+	plugins := plugin.New(filepath.Join(baseDir, "plugins"), dataDir)
+	plugins.Host = func() plugin.HostInfo {
+		site := ""
+		if t, _ := topo.Snapshot(); t != nil {
+			site = t.Site.Name
+		}
+		return plugin.HostInfo{Version: version, Site: site, URL: uiURL}
+	}
+	config.SetExtraChannels(plugins.HasNotifiers)
+	alerts.SetSender(notifySender(plugins, "alert"))
+	alerts.OnEvents = func(evs []alert.Event, notified bool) {
+		plugins.Emit(plugin.HookAlert, map[string]interface{}{"events": evs, "notified": notified})
+	}
+
 	disc := discovery.New(cfgMgr, topo, mon, dataDir)
-	notify := func(page string) func(title string, lines []string) {
+	notify := func(page, source string) func(title string, lines []string) {
+		send := notifySender(plugins, source)
 		return func(title string, lines []string) {
 			c := cfgMgr.Get().Alert
-			if !c.Enabled || !c.HasChannels() {
+			if !c.Enabled || !(c.HasChannels() || plugins.HasNotifiers()) {
 				return
 			}
 			content := "### " + c.SiteTitle + " · " + title + "\n"
@@ -103,15 +124,21 @@ func main() {
 				}
 				content += l + "\n"
 			}
-			if err := alert.SendNotifications(c, content); err != nil {
+			if err := send(c, content); err != nil {
 				log.Printf("发送%s通知失败: %v", page, err)
 			}
 		}
 	}
-	disc.Notify = notify("扫描发现")
+	disc.Notify = notify("扫描发现", "discovery")
+	disc.OnChanges = func(r *discovery.ScanResult) {
+		plugins.Emit(plugin.HookDiscovery, map[string]interface{}{"job": r.JobName, "changes": r.Changes, "suggestions": r.Suggestions})
+	}
 	alerts.HoldDown = disc.HoldDown
 	loc := locate.New(cfgMgr, topo, dataDir)
-	loc.Notify = notify("端口定位")
+	loc.Notify = notify("端口定位", "locate")
+	loc.OnChanges = func(r *locate.RunResult) {
+		plugins.Emit(plugin.HookLocate, map[string]interface{}{"changes": r.Changes, "suggestions": r.Suggestions})
+	}
 	disc.OnAdded = loc.Trigger
 
 	apply := func(t *topology.Topology) {
@@ -168,7 +195,7 @@ func main() {
 
 	server.Version = version
 	srv := &server.Server{Cfg: cfgMgr, Topo: topo, Mon: mon, Alerts: alerts, Store: st, BaseDir: baseDir,
-		DocsMD: docsMD, SchemaJSON: schemaJSON, Disc: disc, Loc: loc}
+		DocsMD: docsMD, SchemaJSON: schemaJSON, Disc: disc, Loc: loc, Plugins: plugins, PluginDocMD: pluginDocMD}
 	addr, err := srv.Start()
 	if err != nil {
 		fatal(err)
@@ -177,6 +204,7 @@ func main() {
 
 	shutdown := func() {
 		close(stop)
+		plugins.Close()
 		srv.Close()
 		mon.Close()
 		log.Printf("netPing 已退出")
@@ -217,6 +245,27 @@ func main() {
 			}()
 		},
 	})
+}
+
+// notifySender 在内置通知渠道之外，把消息同时发给已启用的通知类插件；两边互不影响，失败原因合并返回。
+func notifySender(plugins *plugin.Manager, source string) alert.Sender {
+	return func(cfg config.AlertConfig, content string) error {
+		builtin := cfg.HasChannels()
+		var builtinErr error
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			if builtin {
+				builtinErr = alert.SendNotifications(cfg, content)
+			}
+		}()
+		n, pluginErr := plugins.Notify(source, content)
+		<-done
+		if !builtin && n == 0 {
+			return errors.New("未配置通知渠道")
+		}
+		return errors.Join(builtinErr, pluginErr)
+	}
 }
 
 func trayStatus(mon *monitor.Monitor) (string, int, bool) {
