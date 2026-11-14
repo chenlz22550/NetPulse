@@ -54,12 +54,12 @@ func Quit() { systray.Quit() }
 
 func onReady(o Options, icons [4][]byte) {
 	systray.SetIcon(icons[LevelOK])
-	systray.SetTooltip("netPing")
+	systray.SetTooltip("网脉 NetPulse")
 	if runtime.GOOS == "darwin" {
 		systray.SetTitle("")
 	}
 
-	mStatus := systray.AddMenuItem("netPing 启动中…", "")
+	mStatus := systray.AddMenuItem("网脉 NetPulse 启动中…", "")
 	mStatus.Disable()
 	systray.AddSeparator()
 	mOpen := systray.AddMenuItem("打开管理页面", o.URL)

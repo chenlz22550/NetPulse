@@ -82,7 +82,7 @@ func TestMCPProbeTools(t *testing.T) {
 	old := readARP
 	defer func() { readARP = old }()
 	readARP = func() ([]discovery.ARPEntry, error) {
-		return []discovery.ARPEntry{{IP: "192.168.50.29", MAC: "2:0:0:0:0:12"}}, nil
+		return []discovery.ARPEntry{{IP: "192.168.50.29", MAC: "02:00:00:00:00:12"}}, nil
 	}
 	if txt, isErr := call(t, ts, "arp_lookup", map[string]interface{}{"ip": "192.168.50.29", "refresh": false}); isErr || !strings.Contains(txt, `"mac_matches_registered": true`) {
 		t.Fatalf("arp_lookup: %s", txt)

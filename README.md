@@ -1,4 +1,10 @@
-# netPing — 机房网络 Ping 监控
+# 网脉 NetPulse
+
+看清网络连接，及时发现异常。
+
+[使用 Wiki](https://chenlz22550.github.io/NetPulse/) · [下载](https://github.com/chenlz22550/NetPulse/releases) · [问题反馈](https://github.com/chenlz22550/NetPulse/issues)
+
+MIT 开源的轻量网络监控与智能诊断工具。产品原名 netPing；可执行文件、模块名及数据目录沿用旧名称，方便已有部署升级。
 
 常驻 Windows 系统托盘的小工具：持续 ping 机房里的交换机和终端，统计延迟、抖动和丢包，
 用可拖动的拓扑图管理节点和接线位置，异常时推送到企业微信群机器人。
@@ -12,7 +18,7 @@
 
 1. 把 `netPing.exe` 放到一个固定目录（如 `D:\netPing\`）并双击运行。首次运行会在同目录生成：
    - `config.yaml` 程序配置（监听端口、默认 ping 参数、告警）
-   - `topology.yaml` 节点拓扑（内置当前机房 VLAN 1 的全部节点）
+   - `topology.yaml` 节点拓扑（内置纯虚构演示拓扑，请替换为自己的设备）
    - `data/` 历史数据与告警记录，`logs/` 日志
 2. 右下角托盘出现图标（绿=正常，橙=丢包/延迟高，红=有离线，灰=暂停），浏览器会自动打开管理页面。
    之后可从托盘菜单「打开管理页面」进入，默认地址 `http://127.0.0.1:8090/`。

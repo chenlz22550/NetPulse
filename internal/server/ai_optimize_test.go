@@ -113,7 +113,7 @@ func TestAIOptimize(t *testing.T) {
 		t.Fatalf("undo: %d", code)
 	}
 	tp, _ = s.Topo.Snapshot()
-	if na, nb := tp.FindNode(a), tp.FindNode(b); na.Monitor.Alert || nodeCategory(na) != "" || nb.Name != "" {
+	if na, nb := tp.FindNode(a), tp.FindNode(b); na.Monitor.Alert || nodeCategory(na) != "" || nb.Name != "演示终端 02" {
 		t.Fatalf("撤销后应恢复: %+v / %+v", na, nb)
 	}
 }

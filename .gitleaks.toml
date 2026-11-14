@@ -1,0 +1,19 @@
+title = "NetPulse secret scan"
+[extend]
+useDefault = true
+
+# xterm's minified FourKeyMap expression is an upstream symbol, not a key.
+[[allowlists]]
+condition = "AND"
+description = "Upstream xterm FourKeyMap symbol"
+paths = ['''web/static/vendor/xterm/xterm\.js$''']
+regexTarget = "match"
+regexes = ['''t\.FourKeyMap=''']
+
+# The mock URL is only parsed in a local test; no external request is made.
+[[allowlists]]
+condition = "AND"
+description = "Explicit mock webhook token"
+paths = ['''internal/server/mcp_config_test\.go$''']
+regexTarget = "match"
+regexes = ['''key=abcdef123456''']

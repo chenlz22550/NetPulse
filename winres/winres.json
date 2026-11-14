@@ -14,7 +14,7 @@
           "name": "netPing",
           "version": "1.0.0.0"
         },
-        "description": "netPing 机房网络监控",
+        "description": "网脉 NetPulse 网络监控",
         "minimum-os": "win7",
         "execution-level": "as invoker",
         "ui-access": false,
@@ -43,14 +43,14 @@
           "0409": {
             "Comments": "",
             "CompanyName": "",
-            "FileDescription": "netPing 机房网络监控",
+            "FileDescription": "网脉 NetPulse 网络监控",
             "FileVersion": "1.0.0",
             "InternalName": "netPing",
             "LegalCopyright": "",
             "LegalTrademarks": "",
             "OriginalFilename": "netPing.exe",
             "PrivateBuild": "",
-            "ProductName": "netPing",
+            "ProductName": "NetPulse",
             "ProductVersion": "1.0.0",
             "SpecialBuild": ""
           }

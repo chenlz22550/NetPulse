@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestSeedMatchesScreenshot(t *testing.T) {
+func TestSeedIsSynthetic(t *testing.T) {
 	topo := Seed()
 	if len(topo.Switches) != 2 || len(topo.Links) != 1 {
 		t.Fatalf("switches=%d links=%d", len(topo.Switches), len(topo.Links))
@@ -16,13 +16,9 @@ func TestSeedMatchesScreenshot(t *testing.T) {
 	if len(topo.Nodes) != 44 {
 		t.Fatalf("nodes = %d, want 44", len(topo.Nodes))
 	}
-	vendors := map[string]int{}
 	for _, n := range topo.Nodes {
-		vendors[n.Vendor]++
-	}
-	for v, want := range map[string]int{"深大智能": 11, "ASIX": 8, "中崎": 4, "JWIPC": 4, "纬创（中山）": 3, "华为": 2, "TP-LINK": 2} {
-		if vendors[v] != want {
-			t.Errorf("vendor %s = %d, want %d", v, vendors[v], want)
+		if n.Vendor != "示例厂商" || !strings.HasPrefix(n.MAC, "02:00:00:") {
+			t.Fatalf("seed must contain synthetic devices: %+v", n)
 		}
 	}
 	gw := topo.FindNode("n-192-168-50-1")

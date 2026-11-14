@@ -1,4 +1,4 @@
-/* netPing 管理页面主程序：路由、数据同步、各页面渲染。 */
+/* 网脉 NetPulse 管理页面主程序：路由、数据同步、各页面渲染。 */
 (function () {
   'use strict';
   const $ = (sel, root) => (root || document).querySelector(sel);
@@ -203,9 +203,9 @@
     S.changedOnDisk = d.changed_on_disk;
     computeVendorColors();
     const site = S.topo.site || {};
-    $('#siteTitle').innerHTML = `${esc(site.name || 'netPing')}<span class="slash">/</span>网络拓扑`;
+    $('#siteTitle').innerHTML = `${esc(site.name || '网脉 NetPulse')}<span class="slash">/</span>网络拓扑`;
     $('#siteSub').textContent = [site.subnet, site.gateway ? '网关 ' + site.gateway : '', `${S.topo.switches.length} 交换机 · ${S.topo.nodes.length} 节点`].filter(Boolean).join(' · ');
-    document.title = (site.name || 'netPing') + ' · netPing';
+    document.title = (site.name || '网脉 NetPulse') + ' · 网脉 NetPulse';
     if (S.sel && !findSel(S.sel)) S.sel = null;
     if (page && page.onTopology) page.onTopology();
   }
@@ -305,10 +305,10 @@
     const SECTIONS = [
       ['start', '快速上手', `
         <ol class="g-steps">
-          <li><b>运行程序。</b>Windows：把 <code>netPing.exe</code> 放到固定目录（如 <code>D:\\netPing\\</code>）双击运行，不需要管理员权限；
-            macOS：把 <code>netPing.app</code> 拖到「应用程序」后打开，首次提示“无法验证开发者”时右键 →「打开」。
+          <li><b>运行程序。</b>Windows：把 <code>网脉 NetPulse.exe</code> 放到固定目录（如 <code>D:\\网脉 NetPulse\\</code>）双击运行，不需要管理员权限；
+            macOS：把 <code>网脉 NetPulse.app</code> 拖到「应用程序」后打开，首次提示“无法验证开发者”时右键 →「打开」。
             程序常驻在任务栏托盘 / 菜单栏，图标颜色：<span class="g-dot ok"></span>正常 <span class="g-dot warn"></span>丢包或延迟高 <span class="g-dot down"></span>有设备离线 <span class="g-dot idle"></span>暂停。</li>
-          <li><b>设置登录密码。</b>第一次打开管理页面时，在<b>运行 netPing 的电脑上</b>设置密码（至少 6 位）。之后每次打开都要输入密码，登录后这个浏览器 30 天内免登录。</li>
+          <li><b>设置登录密码。</b>第一次打开管理页面时，在<b>运行 网脉 NetPulse 的电脑上</b>设置密码（至少 6 位）。之后每次打开都要输入密码，登录后这个浏览器 30 天内免登录。</li>
           <li><b>核对机房和设备。</b>在「设置 → 机房信息」填写网段和默认网关；到「拓扑」页检查交换机、端口和设备是否和实际一致。设备多时可以用「扫描发现」自动添加。</li>
           <li><b>配置告警。</b>在「设置」里填写所需通知渠道的 Webhook 并发送测试消息；再到「监控列表」给需要告警的设备打勾。<b>设备默认只监控、不告警。</b></li>
           <li><b>按需开启更多功能：</b>「端口定位」自动查出设备插在哪个交换机口；「MCP」让 AI 助手用自然语言查询和维护。</li>
@@ -382,9 +382,9 @@
           <li><b>AI 自主发现</b>：不知道还有哪些网段、哪些设备时，点「✦ AI 自主发现」（可写上要求或指定网段）。AI 会根据本机网卡、ARP 表、已有设备推断要探测的网段，
             只读扫描后识别新设备的类型（看开放端口、网页标题、SNMP 描述、主机名、厂商），能定位的查出接在哪个交换机口，最后列出建议添加的设备、建议新建的扫描任务和其他发现
             （如私接路由器）。名称、类别、告警都可以改，勾选后才添加，添加后可以撤销。只探测私有地址和已配置的网段，需要先在「AI 诊断」页设置模型。</li>
-          <li>扫描时读取电脑的 ARP 表获得 MAC，所以<b>只能看到和运行 netPing 的电脑在同一网段（VLAN）的设备 MAC</b>；其他网段只能发现在线。</li>
+          <li>扫描时读取电脑的 ARP 表获得 MAC，所以<b>只能看到和运行 网脉 NetPulse 的电脑在同一网段（VLAN）的设备 MAC</b>；其他网段只能发现在线。</li>
         </ul>
-        <div class="g-note">macOS 上第一次扫描时，如果系统询问“允许 netPing 查找本地网络上的设备”，请选择<b>允许</b>，否则读不到 MAC。</div>
+        <div class="g-note">macOS 上第一次扫描时，如果系统询问“允许 网脉 NetPulse 查找本地网络上的设备”，请选择<b>允许</b>，否则读不到 MAC。</div>
         ${go('discovery', '打开扫描发现')}`],
 
       ['locate', '端口定位：查出设备插在哪个口', `
@@ -410,14 +410,14 @@
           <li>所有交换机、设备、链路保存在 <code>topology.yaml</code>，文件开头有全部字段说明。「设置」页可以在线编辑、导入、下载这个文件，保存前会自动校验。</li>
           <li>用文本编辑器或 AI 改了文件后，在「设置」里点「从磁盘重新加载」生效。</li>
           <li>程序配置在 <code>config.yaml</code>：监听地址、告警、扫描、定位、MCP 等。网页上能改的项目改了立即生效；监听地址需要重启程序。</li>
-          <li>数据目录：Windows 为 exe 所在目录，macOS 为 <code>~/Library/Application Support/netPing</code>，可从托盘菜单「打开数据目录」进入。<code>data/</code> 是历史数据和告警记录，<code>logs/</code> 是日志。</li>
+          <li>数据目录：Windows 为 exe 所在目录，macOS 为 <code>~/Library/Application Support/网脉 NetPulse</code>，可从托盘菜单「打开数据目录」进入。<code>data/</code> 是历史数据和告警记录，<code>logs/</code> 是日志。</li>
           <li><b>迁移到新机房</b>：把新机房交换机的 MAC 表和 ARP 表交给 AI，按 <code>docs/topology-fields.md</code> 里的提示词生成新的 topology.yaml；接入 MCP 后也可以直接让 AI 生成并写入。</li>
         </ul>
         ${go('settings', '打开设置')}`],
 
       ['aidiag', 'AI 诊断：让大模型帮你看问题', `
         <ul>
-          <li>「AI 诊断」页用大模型（默认 DeepSeek 的 deepseek-flash）结合 netPing 的实时数据和历史曲线诊断网络问题，给出<b>结论、依据和排查步骤</b>。</li>
+          <li>「AI 诊断」页用大模型（默认 DeepSeek 的 deepseek-flash）结合 网脉 NetPulse 的实时数据和历史曲线诊断网络问题，给出<b>结论、依据和排查步骤</b>。</li>
           <li>第一次使用：在页面右侧填写 API Key（在 DeepSeek 开放平台创建），点「测试连接」确认正常。服务器不能直接上网时，可填写 HTTP 代理（留空则使用告警设置里的代理）。</li>
           <li>点「一键诊断」「最近 1 小时」「分析告警」等快捷按钮，或直接描述现象，如“3 楼打印机经常连不上”。可以接着追问。</li>
           <li>在拓扑页的设备详情、设备曲线页点「AI 诊断」，会直接诊断这一台设备。</li>
@@ -429,7 +429,7 @@
 
       ['mcp', 'AI 接入（MCP）', `
         <ul>
-          <li>netPing 内置 MCP 接口，可以接入 Claude Code、Cursor、WorkBuddy、VS Code、Claude Desktop、Cherry Studio 等 AI 客户端，用自然语言查延迟丢包、分析历史、维护设备和告警。</li>
+          <li>网脉 NetPulse 内置 MCP 接口，可以接入 Claude Code、Cursor、WorkBuddy、VS Code、Claude Desktop、Cherry Studio 等 AI 客户端，用自然语言查延迟丢包、分析历史、维护设备和告警。</li>
           <li>接入步骤：在「MCP」页点「生成」访问令牌并保存 → 选择你用的客户端，复制配置片段 → 粘贴到客户端的 MCP 配置里。点「测试连接」可确认接口可用。</li>
           <li>只想让 AI 查询、不允许修改时，勾选「只读模式」。AI 的每次修改都会记录在日志里。</li>
           <li>页面下方有示例问法，比如“现在机房有哪些设备离线或丢包？”、“扫描一下网段，把新发现的打印机放到接入交换机 Port 7”。</li>
@@ -438,30 +438,30 @@
 
       ['plugins', '插件', `
         <ul>
-          <li>插件可以给 netPing 增加新的<b>通知渠道</b>（邮件、短信、工单系统…）、在告警或设备变化时<b>执行自定义动作</b>，或给 AI 助手提供<b>新的查询工具</b>。</li>
+          <li>插件可以给 网脉 NetPulse 增加新的<b>通知渠道</b>（邮件、短信、工单系统…）、在告警或设备变化时<b>执行自定义动作</b>，或给 AI 助手提供<b>新的查询工具</b>。</li>
           <li>安装：把插件文件夹放进数据目录的 <code>plugins</code> 目录 → 在「插件」页点「重新扫描」→ 填写设置 → 点「测试运行」确认正常 → 点「启用」。新插件默认不启用。</li>
           <li>通知类插件和企业微信等内置渠道一起收到告警；只用插件发通知时，不填内置渠道地址也可以打开告警开关。</li>
-          <li>插件是独立的小程序，以 netPing 的权限运行，<b>只安装来源可信的插件</b>。网页和 AI 助手都不能上传或安装插件。</li>
+          <li>插件是独立的小程序，以 网脉 NetPulse 的权限运行，<b>只安装来源可信的插件</b>。网页和 AI 助手都不能上传或安装插件。</li>
           <li>想自己写插件：用任何语言都可以，「插件」页的「开发指南」里有协议说明和完整示例。</li>
         </ul>
         ${go('plugins', '打开插件')}`],
 
       ['account', '登录与安全', `
         <ul>
-          <li>打开管理页面需要输入密码，登录后这个浏览器 30 天内免登录；netPing 重启不影响。</li>
+          <li>打开管理页面需要输入密码，登录后这个浏览器 30 天内免登录；网脉 NetPulse 重启不影响。</li>
           <li>「设置 → 登录密码」可以修改密码或退出登录。修改密码后，其他已登录的浏览器都需要重新登录。</li>
           <li>同一来源连续输错 5 次密码会被暂时锁定（1 分钟起，最长 15 分钟）。</li>
-          <li><b>忘记密码</b>：删除 config.yaml 中 <code>auth</code> 下的 <code>password_hash</code> 和 <code>password</code> 两行，重启 netPing，再在运行 netPing 的电脑上打开网页重新设置。</li>
+          <li><b>忘记密码</b>：删除 config.yaml 中 <code>auth</code> 下的 <code>password_hash</code> 和 <code>password</code> 两行，重启 网脉 NetPulse，再在运行 网脉 NetPulse 的电脑上打开网页重新设置。</li>
         </ul>`],
 
       ['faq', '常见问题', `
         <dl class="g-faq">
           <dt>所有设备都显示离线？</dt>
-          <dd>先在运行 netPing 的电脑上用命令行 <code>ping</code> 一个设备 IP，确认网络能通。电脑不在机房网段、或设备防火墙禁 ping 时都会显示离线。</dd>
+          <dd>先在运行 网脉 NetPulse 的电脑上用命令行 <code>ping</code> 一个设备 IP，确认网络能通。电脑不在机房网段、或设备防火墙禁 ping 时都会显示离线。</dd>
           <dt>群里收不到告警？</dt>
           <dd>先点「发送测试消息」看报错；确认设备已开启告警（卡片上有「告警」标签）；检查是否处于暂停或非监控时段。服务器不能上网时需要配置代理。</dd>
           <dt>扫描发现读不到 MAC、不能跟踪 IP？</dt>
-          <dd>只有和运行 netPing 的电脑在同一网段的设备才能读到 MAC。macOS 还需要在「系统设置 → 隐私与安全性 → 本地网络」里允许 netPing。</dd>
+          <dd>只有和运行 网脉 NetPulse 的电脑在同一网段的设备才能读到 MAC。macOS 还需要在「系统设置 → 隐私与安全性 → 本地网络」里允许 网脉 NetPulse。</dd>
           <dt>卡片位置乱了？</dt>
           <dd>点拓扑页的「自动排布」，按端口重新排列；不满意 10 秒内点「撤销」。</dd>
           <dt>端口定位把设备放到了级联口上？</dt>
@@ -589,7 +589,7 @@
     };
     const renderLog = () => {
       log.innerHTML = chat.length ? chat.map(msgHTML).join('') :
-        `<div class="ai-empty"><b>有什么网络问题？</b><br>点下面的快捷按钮，或直接描述现象。AI 会结合 netPing 的实时数据和历史曲线给出判断。</div>`;
+        `<div class="ai-empty"><b>有什么网络问题？</b><br>点下面的快捷按钮，或直接描述现象。AI 会结合 网脉 NetPulse 的实时数据和历史曲线给出判断。</div>`;
       log.scrollTop = log.scrollHeight;
     };
     const renderOne = i => {
@@ -825,8 +825,8 @@
       try { reportCSS = await (await fetch('style.css')).text(); } catch (e) { reportCSS = ''; }
     }
     const foot = rp.model === 'deterministic'
-      ? '本报告由 netPing 程序确定性统计生成（无需 AI），仅统计激活期间的实际观测数据。'
-      : '本报告由 netPing AI 生成，正文结论由大模型基于监控数据撰写，附录数据由程序直接统计。';
+      ? '本报告由 网脉 NetPulse 程序确定性统计生成（无需 AI），仅统计激活期间的实际观测数据。'
+      : '本报告由 网脉 NetPulse AI 生成，正文结论由大模型基于监控数据撰写，附录数据由程序直接统计。';
     return `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${esc(rp.title)}</title>
@@ -893,7 +893,7 @@ body { padding: 32px 16px; }
         <button class="btn small" id="rPdf" title="打开打印对话框，目标选择「另存为 PDF」">打印 / PDF</button>
         <button class="btn small" id="rCopy">复制原文</button>
         <button class="btn small danger" id="rDel">删除</button>`;
-      const base = 'netPing-运维报告-' + cur.id;
+      const base = '网脉 NetPulse-运维报告-' + cur.id;
       $('#rMd').onclick = async () => {
         try {
           const md = await api('GET', 'api/ai/reports/' + encodeURIComponent(cur.id) + '.md');
@@ -1975,7 +1975,7 @@ body { padding: 32px 16px; }
         <a class="btn small" href="#/ai/${encodeURIComponent(id)}" title="让 AI 结合实时数据和历史曲线诊断这台设备">AI 诊断</a>
       </div>
       <div class="panel"><div class="ph">端口扫描与 TCPing 监控</div><div class="pb">
-        <p class="help">从 netPing 服务器探测。持续监控独立于 Ping 结果，沿用设备的间隔、超时、告警和监控时段；拒绝连接或超时均记为失败。</p>
+        <p class="help">从 网脉 NetPulse 服务器探测。持续监控独立于 Ping 结果，沿用设备的间隔、超时、告警和监控时段；拒绝连接或超时均记为失败。</p>
         <div class="row2 tcp-config">
           <form id="portScanForm"><label class="f"><span>扫描端口（最多 1024 个，支持 1-1024）</span><input name="ports" value="22,23,80,443,445,554,3389,8000,8080,9100" required></label>
             <div class="btns"><button class="btn" type="submit">扫描端口</button><button class="btn" type="button" id="cancelPortScan" disabled>取消</button></div></form>
@@ -2190,7 +2190,7 @@ body { padding: 32px 16px; }
             <label class="f"><span>再输一次</span><input type="password" name="p2" autocomplete="new-password" minlength="6" required></label>
           </div>
           <div class="btns"><button class="btn primary" type="submit">修改密码</button></div>
-          <div class="help">打开管理页面需要输入这个密码，登录后浏览器 30 天内免登录。修改密码后，其他已登录的浏览器都需要重新登录。忘记密码时，删除 config.yaml 中 auth 下的 password_hash 和 password 两行并重启 netPing，再在运行 netPing 的电脑上打开网页重新设置。</div>
+          <div class="help">打开管理页面需要输入这个密码，登录后浏览器 30 天内免登录。修改密码后，其他已登录的浏览器都需要重新登录。忘记密码时，删除 config.yaml 中 auth 下的 password_hash 和 password 两行并重启 网脉 NetPulse，再在运行 网脉 NetPulse 的电脑上打开网页重新设置。</div>
         </form></div></div>
         <div class="panel"><div class="ph">关于</div><div class="pb" id="about"></div></div>
       </div>
@@ -2780,7 +2780,7 @@ body { padding: 32px 16px; }
       <div class="mcp-hero">
         <div>
           <h2>插件 <span id="pStat"></span></h2>
-          <div class="help" style="margin:0">插件可以给 netPing 增加新的通知渠道（短信、邮件、工单系统…）、在告警和设备变化时执行自定义动作，
+          <div class="help" style="margin:0">插件可以给 网脉 NetPulse 增加新的通知渠道（短信、邮件、工单系统…）、在告警和设备变化时执行自定义动作，
             或给 AI 助手提供新的查询工具。插件是放在数据目录里的独立小程序，用任何语言都能写。</div>
         </div>
       </div>
@@ -2795,7 +2795,7 @@ body { padding: 32px 16px; }
         <table class="grid flat"><thead><tr><th>时间</th><th>插件</th><th>类型</th><th>结果</th><th>耗时</th><th>说明</th></tr></thead><tbody id="pRuns"></tbody></table>
       </div></div>
       <div class="panel"><div class="ph">安全说明</div><div class="pb"><ul class="help" style="margin:0;padding-left:18px">
-        <li>插件以 netPing 的系统账号运行，能读写这台电脑上 netPing 能访问的一切。<b>只安装来源可信、看得懂的插件。</b></li>
+        <li>插件以 网脉 NetPulse 的系统账号运行，能读写这台电脑上 网脉 NetPulse 能访问的一切。<b>只安装来源可信、看得懂的插件。</b></li>
         <li>网页和 MCP 都不能上传或安装插件，只能由能登录这台电脑的人把文件放进插件目录。AI 助手不能启停或配置插件。</li>
         <li>设置里的密钥保存在 <code>data/plugins.json</code>，网页不回显；调用时通过标准输入传给插件，不出现在命令行里。</li>
         <li>标记为「修改」的插件工具在 MCP 只读模式下不可用，网页「AI 诊断」永远不会调用。</li>
@@ -2872,7 +2872,7 @@ body { padding: 32px 16px; }
         : '<tr><td colspan="6" class="muted" style="text-align:center;padding:16px">暂无调用记录</td></tr>';
       $$('[data-toggle]', app).forEach(b => b.onclick = async () => {
         const p = ps.find(x => x.id === b.dataset.toggle);
-        if (!p.enabled && !confirm(`启用插件「${p.name}」？\n\n启用后它会以 netPing 的权限在这台电脑上运行：\n${p.command.join(' ')}\n\n请确认插件来源可信。`)) return;
+        if (!p.enabled && !confirm(`启用插件「${p.name}」？\n\n启用后它会以 网脉 NetPulse 的权限在这台电脑上运行：\n${p.command.join(' ')}\n\n请确认插件来源可信。`)) return;
         try {
           data = await api('PUT', 'api/plugins/' + encodeURIComponent(p.id), { enabled: !p.enabled });
           toast(p.enabled ? `已停用「${p.name}」` : `已启用「${p.name}」`); draw();
@@ -3069,7 +3069,7 @@ body { padding: 32px 16px; }
       $('#mCfg').innerHTML = `<div class="help">${t.note}</div>
         <div class="codebox"><button class="btn small" id="mCopyCode">${copyLabel}</button><pre id="mCode">${esc(t.code)}</pre></div>
         ${workbuddy ? `<div class="help">配置使用当前访问地址，可直接粘贴到 WorkBuddy。${needsEnable ? '点击按钮将启用 MCP 接口。' : ''}${needsToken ? '点击按钮将生成并保存访问令牌，复制的配置会自动带上认证信息。' : '已包含访问令牌。'}${local ? '适用于本机 WorkBuddy；其他电脑请通过服务器局域网 IP 打开本页后再复制。' : ''}</div>` : needsToken ? '<div class="help" style="color:var(--down)">还没有设置访问令牌：管理页面需要登录，AI 客户端按上面的配置会连不上。请在左侧「访问令牌」点「生成」并保存，这里的配置会自动带上令牌。</div>' : ''}
-        ${local && tab !== 'claude' && !workbuddy ? '<div class="help">请把 &lt;服务器IP&gt; 替换为运行 netPing 的电脑的 IP；AI 客户端就在本机时也可以用 127.0.0.1。</div>' : ''}`;
+        ${local && tab !== 'claude' && !workbuddy ? '<div class="help">请把 &lt;服务器IP&gt; 替换为运行 网脉 NetPulse 的电脑的 IP；AI 客户端就在本机时也可以用 127.0.0.1。</div>' : ''}`;
       $('#mCopyCode').onclick = async ev => {
         if (!workbuddy) { await copyText(t.code); return; }
         const button = ev.currentTarget;
@@ -3121,7 +3121,7 @@ body { padding: 32px 16px; }
       s.push(info.read_only ? '<span class="badge slow">只读</span>' : '<span class="badge unknown">可读写</span>');
       s.push(info.token_set ? '<span class="badge ok">令牌认证</span>' : info.auth_basic ? '<span class="badge unknown">需要令牌</span>' : '<span class="badge slow">尚未设置密码</span>');
       $('#mStat').innerHTML = s.join(' ');
-      const kind = t => (t.plugin ? '<span class="badge unknown">插件</span> ' : '') + (t.destructive ? '<span class="badge down">修改·需确认</span>' : t.write ? '<span class="badge slow">修改</span>' : t.probe ? '<span class="badge ok" title="从 netPing 主机实时发包探测，只读">查询·实时探测</span>' : '<span class="badge ok">查询</span>');
+      const kind = t => (t.plugin ? '<span class="badge unknown">插件</span> ' : '') + (t.destructive ? '<span class="badge down">修改·需确认</span>' : t.write ? '<span class="badge slow">修改</span>' : t.probe ? '<span class="badge ok" title="从 网脉 NetPulse 主机实时发包探测，只读">查询·实时探测</span>' : '<span class="badge ok">查询</span>');
       $('#mTools').innerHTML = info.tools.map(t => `<tr${info.read_only && t.write ? ' class="dim"' : ''}><td class="mono"><b>${esc(t.name)}</b><br><span class="muted" style="font-family:var(--sans)">${esc(t.title)}</span></td><td class="wrap">${esc(t.description)}</td><td>${kind(t)}</td></tr>`).join('');
       const nw = info.tools.filter(t => !t.write).length;
       $('#mToolCnt').textContent = `${info.tools.length} 个（查询 ${nw}，修改 ${info.tools.length - nw}）${info.read_only ? '，只读模式下修改类工具不可用' : ''}`;
@@ -3148,7 +3148,7 @@ body { padding: 32px 16px; }
       out.innerHTML = '测试中…';
       const t0 = performance.now();
       try {
-        const init = await rpcCall('initialize', { protocolVersion: info.protocol, capabilities: {}, clientInfo: { name: 'netPing 网页测试', version: '1' } }, 1);
+        const init = await rpcCall('initialize', { protocolVersion: info.protocol, capabilities: {}, clientInfo: { name: '网脉 NetPulse 网页测试', version: '1' } }, 1);
         const tl = await rpcCall('tools/list', {}, 2);
         const ov = await rpcCall('tools/call', { name: 'get_overview', arguments: {} }, 3);
         const o = JSON.parse(ov.content[0].text);
@@ -3742,7 +3742,7 @@ body { padding: 32px 16px; }
         <label>密码 <input name="password" class="ssh-password" type="password" autocomplete="new-password" maxlength="4096"></label>` : ''}
         <button class="btn primary" type="submit">连接</button><button class="btn" type="button" data-disconnect disabled>断开</button>
         <span role="status" data-state>未连接</span></form>
-        <div class="help">由 netPing 服务器连接设备；${isSSH ? '先填写用户名和密码，首次连接需核对主机指纹。' : '请在终端输入账号和密码。Telnet 使用明文传输。'}账号密码不保存在 netPing。配置修改会直接作用于设备，按设备要求保存配置。</div>
+        <div class="help">由 网脉 NetPulse 服务器连接设备；${isSSH ? '先填写用户名和密码，首次连接需核对主机指纹。' : '请在终端输入账号和密码。Telnet 使用明文传输。'}账号密码不保存在 网脉 NetPulse。配置修改会直接作用于设备，按设备要求保存配置。</div>
         ${isSSH ? `<div class="ssh-hostkey hidden" data-hostkey><b>首次连接：请核对设备主机指纹</b><div class="mono" data-fingerprint></div>
         <button type="button" class="btn primary" data-trust>信任此主机并继续</button> <button type="button" class="btn" data-reject>取消连接</button></div>` : ''}
         <div class="telnet-screen" aria-label="设备交互终端"></div>
@@ -3881,7 +3881,7 @@ body { padding: 32px 16px; }
         </div></div>
         <div class="panel"><div class="ph">默认 SNMP 设置 · 当前机房</div><div class="pb"><form id="lf"></form></div></div>
         <div class="panel"><div class="ph">交换机上需要的配置（参考）</div><div class="pb">
-          <div class="help" style="margin-top:0">自动定位只需开启 SNMP v2c <b>只读</b>团体名，读取标准 BRIDGE-MIB / IF-MIB。需要修改交换机配置时，点右侧「Telnet」手动登录终端。建议限制只允许 netPing 服务器访问。</div>
+          <div class="help" style="margin-top:0">自动定位只需开启 SNMP v2c <b>只读</b>团体名，读取标准 BRIDGE-MIB / IF-MIB。需要修改交换机配置时，点右侧「Telnet」手动登录终端。建议限制只允许 网脉 NetPulse 服务器访问。</div>
           <pre class="code">! 锐捷
 snmp-server community 团体名 ro
 ! 华为

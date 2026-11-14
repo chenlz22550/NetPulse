@@ -148,7 +148,7 @@ func TestARPLookup(t *testing.T) {
 	defer func() { readARP = old }()
 	readARP = func() ([]discovery.ARPEntry, error) {
 		return []discovery.ARPEntry{
-			{IP: "192.168.50.29", MAC: "2:0:0:0:0:12"},
+			{IP: "192.168.50.29", MAC: "02:00:00:00:00:12"},
 			{IP: "192.168.50.10", MAC: "AA:BB:CC:DD:EE:01"},
 		}, nil
 	}

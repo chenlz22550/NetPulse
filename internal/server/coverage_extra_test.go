@@ -73,7 +73,7 @@ func TestAPIExtraEndpointsAndMCPMutations(t *testing.T) {
 	// Locate API endpoints using fakeAccess SNMP agent
 	addr := fakeAccess(t, map[string]int{
 		"AA:BB:CC:00:00:01": 12,
-		"2:0:0:0:0:12": 7,
+		"02:00:00:00:00:12": 7,
 	})
 	apiRequest(t, ts, "GET", "/api/locate", "", 200)
 	apiRequest(t, ts, "POST", "/api/locate/test", `{"host":"`+addr+`","community":"s3cret-ro"}`, 200)

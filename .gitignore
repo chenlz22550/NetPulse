@@ -10,3 +10,15 @@ dist/
 __pycache__/
 examples/plugins/event-log/event-log
 examples/plugins/event-log/event-log.exe
+
+# 本地运行与审计材料
+.cindy-worktrees/
+.venv/
+.env
+.env.*
+*.pem
+*.key
+*.bundle
+*.log
+*.syso
+/coverage*

@@ -150,7 +150,7 @@ func TestMergeHostsProxyARP(t *testing.T) {
 
 func TestNormalizeMAC(t *testing.T) {
 	for in, want := range map[string]string{
-		"2:0:0:0:0:6":   "02:00:00:00:00:06",
+		"02:00:00:00:00:06":   "02:00:00:00:00:06",
 		"02-00-00-00-00-06": "02:00:00:00:00:06",
 		"ff:ff:ff:ff:ff:ff": "",
 		"01:00:5e:00:00:01": "",

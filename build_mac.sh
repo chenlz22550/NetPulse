@@ -8,14 +8,16 @@ GO=${GO:-go1.20.14}
 command -v "$GO" >/dev/null 2>&1 || GO="$HOME/go/bin/go1.20.14"
 command -v "$GO" >/dev/null 2>&1 || GO=go
 
-VERSION=$(sed -nE 's/^var version = "(.*)"/\1/p' main.go)
+VERSION=${VERSION:-$(sed -nE 's/^var version = "(.*)"/\1/p' main.go)}
+VERSION=${VERSION#v}
+[ -n "$VERSION" ] || { echo "无法从 main.go 读取版本号" >&2; exit 1; }
 OUT=dist/mac
 APP=$OUT/netPing.app
 rm -rf "$OUT"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 echo "== 测试"
-"$GO" test ./internal/... 2>&1 | grep -v ld_classic
+"$GO" test ./internal/... 2>&1 | awk '!/ld_classic/'
 
 export CGO_ENABLED=1 MACOSX_DEPLOYMENT_TARGET=10.13
 for arch in arm64 amd64; do
@@ -23,7 +25,7 @@ for arch in arm64 amd64; do
   [ "$arch" = amd64 ] && carch=x86_64
   echo "== 编译 darwin/$arch"
   GOOS=darwin GOARCH=$arch CC="clang -arch $carch" \
-    "$GO" build -trimpath -ldflags "-s -w" -o "$OUT/netPing-$arch" . 2>&1 | grep -v ld_classic || true
+    "$GO" build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$OUT/netPing-$arch" . 2>&1 | awk '!/ld_classic/'
   [ -f "$OUT/netPing-$arch" ] || { echo "编译 $arch 失败"; exit 1; }
 done
 lipo -create -output "$APP/Contents/MacOS/netPing" "$OUT/netPing-arm64" "$OUT/netPing-amd64"
@@ -46,7 +48,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
 <plist version="1.0">
 <dict>
 	<key>CFBundleName</key><string>netPing</string>
-	<key>CFBundleDisplayName</key><string>netPing</string>
+	<key>CFBundleDisplayName</key><string>网脉 NetPulse</string>
 	<key>CFBundleIdentifier</key><string>com.netping.app</string>
 	<key>CFBundleExecutable</key><string>netPing</string>
 	<key>CFBundleIconFile</key><string>netPing</string>
@@ -63,6 +65,7 @@ EOF
 
 echo "== 签名（ad-hoc）"
 codesign --force --deep -s - "$APP"
+codesign --verify --deep --strict "$APP"
 
 ZIP="dist/netPing-macOS-${VERSION}.zip"
 rm -f "$ZIP"

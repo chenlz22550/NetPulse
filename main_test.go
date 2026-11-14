@@ -59,7 +59,7 @@ func TestMainHelpers(t *testing.T) {
 		Nodes: []*topology.Node{{ID: "n1", IP: "127.0.0.1"}},
 	}, config.Default().Ping))
 	tip, _, _ = trayStatus(mon)
-	if !strings.Contains(tip, "netPing") {
+	if !strings.Contains(tip, "网脉 NetPulse") {
 		t.Fatalf("active trayStatus: %q", tip)
 	}
 

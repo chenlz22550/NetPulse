@@ -50,7 +50,7 @@ type AlertConfig struct {
 
 // Auth 为管理网页的登录密码。网页上设置的密码以 PBKDF2 摘要保存在 password_hash；
 // 也可以手工在 password 填明文（下次在网页上修改密码时会改存为摘要）。
-// 两者都为空表示尚未设置密码，此时只能在运行 netPing 的电脑上打开网页设置。
+// 两者都为空表示尚未设置密码，此时只能在运行 网脉 NetPulse 的电脑上打开网页设置。
 // username 仅用于脚本/MCP 客户端的 HTTP Basic 认证，为空时 Basic 认证不校验用户名。
 type Auth struct {
 	Username     string `yaml:"username" json:"username"`
@@ -233,12 +233,12 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-const header = `# netPing 程序配置（修改 listen / topology_file 后需重启程序生效）
+const header = `# 网脉 NetPulse 程序配置（修改 listen / topology_file 后需重启程序生效）
 #
 # listen                 管理网页监听地址，0.0.0.0:8090 表示允许局域网访问，127.0.0.1:8090 仅本机
 # auth                   管理网页登录密码（登录后浏览器 30 天内免登录）：
 #   password_hash        网页上设置的密码摘要；忘记密码时删掉 password_hash 和 password 两行并重启，
-#                        再在运行 netPing 的电脑上打开网页重新设置
+#                        再在运行 网脉 NetPulse 的电脑上打开网页重新设置
 #   password             也可以直接填明文密码（下次在网页上修改密码时改存为摘要）
 #   username             仅供脚本 / MCP 客户端用 HTTP Basic 认证时校验，留空则不校验用户名
 # topology_file          节点/交换机拓扑文件（相对程序目录）

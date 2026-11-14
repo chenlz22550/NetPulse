@@ -1,6 +1,6 @@
 // fakeswitch 启动一台模拟交换机（SNMP v2c 只读），用于在没有真实交换机时演示和调试端口定位。
 //
-//	go run ./tools/fakeswitch -listen 127.0.0.1:16100 -community public -macs "2:0:0:0:0:12=1,02:00:00:00:00:08=1,02:00:00:00:00:17=26"
+//	go run ./tools/fakeswitch -listen 127.0.0.1:16100 -community public -macs "02:00:00:00:00:12=1,02:00:00:00:00:08=1,02:00:00:00:00:17=26"
 package main
 
 import (

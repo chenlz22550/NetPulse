@@ -1,4 +1,4 @@
-// netPing：机房节点 Ping 监控（系统托盘 + 管理网页 + 企业微信告警）。
+// 网脉 NetPulse：机房节点 Ping 监控（系统托盘 + 管理网页 + 企业微信告警）。
 package main
 
 import (
@@ -59,7 +59,7 @@ func main() {
 	if logFile != nil {
 		defer logFile.Close()
 	}
-	log.Printf("netPing %s 启动，数据目录 %s", version, baseDir)
+	log.Printf("网脉 NetPulse %s 启动，数据目录 %s", version, baseDir)
 
 	cfgMgr, err := config.Load(filepath.Join(baseDir, "config.yaml"))
 	if err != nil {
@@ -223,7 +223,7 @@ func main() {
 		srv.Close()
 		mon.Close()
 		profMgr.Shutdown()
-		log.Printf("netPing 已退出")
+		log.Printf("网脉 NetPulse 已退出")
 	}
 
 	if firstRun && !*noBrowser {
@@ -288,9 +288,9 @@ func trayStatus(mon *monitor.Monitor) (string, int, bool) {
 	sts := mon.Statuses(false)
 	switch mon.PauseReason() {
 	case "manual":
-		return fmt.Sprintf("netPing 已手动暂停（%d 个目标）", len(sts)), tray.LevelPaused, true
+		return fmt.Sprintf("网脉 NetPulse 已手动暂停（%d 个目标）", len(sts)), tray.LevelPaused, true
 	case "schedule":
-		return "netPing 非监控时段，暂停中", tray.LevelPaused, false
+		return "网脉 NetPulse 非监控时段，暂停中", tray.LevelPaused, false
 	}
 	var down, warn, ok int
 	for _, s := range sts {
@@ -303,7 +303,7 @@ func trayStatus(mon *monitor.Monitor) (string, int, bool) {
 			ok++
 		}
 	}
-	tip := fmt.Sprintf("netPing 正常 %d / 告警 %d / 离线 %d", ok, warn, down)
+	tip := fmt.Sprintf("网脉 NetPulse 正常 %d / 告警 %d / 离线 %d", ok, warn, down)
 	level := tray.LevelOK
 	if warn > 0 {
 		level = tray.LevelWarn
@@ -375,6 +375,6 @@ func fatal(err error) {
 	msg := strings.TrimSpace(err.Error())
 	log.Printf("启动失败: %s", msg)
 	fmt.Fprintln(os.Stderr, "启动失败:", msg)
-	showError("netPing 启动失败", msg)
+	showError("网脉 NetPulse 启动失败", msg)
 	os.Exit(1)
 }
