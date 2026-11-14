@@ -201,7 +201,14 @@ aside.side { width: 360px; border-left: 2px solid var(--ink); background: var(--
 .sw .ipt.cnt { opacity: .55; }
 .sw .ipt.foot { font-size: 9.5px; opacity: .7; }
 .sw-dark text { fill: #fff; } .sw-light text { fill: var(--ink); }
-.sw-dark .role, .sw-light .role { fill: var(--accent); }
+.sw-dark .role, .sw-light .role { fill: var(--tc, var(--accent)); }
+/* 网络设备类型：图标与头部色条按类型着色，交换机保持主题色 */
+.t-router { --tc: #3d7be0; } .t-firewall { --tc: #e5482f; } .t-gateway { --tc: #c9971a; } .t-modem { --tc: #8b6ad8; }
+.t-ap { --tc: #1fa38f; } .t-ac { --tc: #178a7a; } .t-lb { --tc: #6b8296; } .t-other { --tc: #8a857a; }
+.sw .ticon, .ticon-svg { fill: none; stroke: var(--tc, var(--accent)); stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; }
+.ticon-svg { display: inline-block; vertical-align: -2px; flex-shrink: 0; }
+.sw:not(.t-switch) .sw-cap { fill: var(--tc); }
+.sym .ty { display: flex; align-items: center; justify-content: center; }
 .sw .lat.ok { fill: #4caf50; } .sw-light .lat.ok { fill: var(--ok); }
 .sw .ledt { font-size: 6.5px; opacity: .65; letter-spacing: .5px; }
 .sw .plabel { font-size: 11px; font-weight: 600; }

@@ -285,16 +285,18 @@ func (s *Server) routeAPI(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleMeta(w http.ResponseWriter) {
 	writeJSON(w, map[string]interface{}{
-		"version":     Version,
-		"started":     s.started.UnixMilli(),
-		"base_dir":    s.BaseDir,
-		"topo_file":   s.Topo.Path(),
-		"paused":      s.Mon.Paused(),
-		"schedule":    s.Cfg.Get().Schedule.Describe(),
-		"roles":       topology.Roles,
-		"flags":       topology.KnownFlags,
-		"node_sides":  topology.NodeSides,
-		"server_time": time.Now().UnixMilli(),
+		"version":      Version,
+		"started":      s.started.UnixMilli(),
+		"base_dir":     s.BaseDir,
+		"topo_file":    s.Topo.Path(),
+		"paused":       s.Mon.Paused(),
+		"schedule":     s.Cfg.Get().Schedule.Describe(),
+		"roles":        topology.Roles,
+		"device_types": topology.DeviceTypes,
+		"type_names":   topology.DeviceTypeNames,
+		"flags":        topology.KnownFlags,
+		"node_sides":   topology.NodeSides,
+		"server_time":  time.Now().UnixMilli(),
 	})
 }
 
