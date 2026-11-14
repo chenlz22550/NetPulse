@@ -74,6 +74,43 @@ nodes:
 	}
 }
 
+func TestDeviceTypes(t *testing.T) {
+	topo, err := Parse([]byte(`
+site: {name: x}
+switches:
+  - {id: fw, name: 防火墙, type: " Firewall ", role: core}
+  - {id: ont, name: 光猫, type: modem}
+  - {id: sw, name: 交换机, type: switch}
+  - {id: old, name: 旧交换机}
+links:
+  - {from: {switch: ont, port: LAN1}, to: {switch: fw, port: WAN1}}
+  - {from: {switch: fw, port: LAN1}, to: {switch: sw, port: "1"}}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, s := range topo.Switches {
+		got[s.ID] = s.Type + "|" + s.DeviceType() + "|" + s.TypeName()
+	}
+	want := map[string]string{"fw": "firewall|firewall|防火墙", "ont": "modem|modem|光猫", "sw": "|switch|交换机", "old": "|switch|交换机"}
+	for id, w := range want {
+		if got[id] != w {
+			t.Errorf("%s: got %q want %q", id, got[id], w)
+		}
+	}
+	out, err := Marshal(topo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(out), "type: ") != 2 {
+		t.Errorf("默认类型 switch 不应写入文件:\n%s", out)
+	}
+	if _, err := Parse([]byte("site: {name: x}\nswitches:\n  - {id: a, name: a, type: toaster}\n")); err == nil || !strings.Contains(err.Error(), "type 必须是") {
+		t.Fatalf("expected type error, got %v", err)
+	}
+}
+
 func TestUnknownFieldRejected(t *testing.T) {
 	_, err := Parse([]byte("version: 1\nsite: {name: x}\nnodes:\n  - {ip: 10.0.0.1, adress: x}\n"))
 	if err == nil || !strings.Contains(err.Error(), "adress") {

@@ -23,7 +23,7 @@ import (
 // deviceCategories 设备类别；分类结果作为同名标签写入节点。
 var deviceCategories = []string{
 	"服务器", "虚拟机", "台式机", "笔记本", "手机平板", "打印机", "摄像头", "录像机", "无线AP",
-	"路由器防火墙", "网络存储", "IP电话", "门禁考勤", "智能设备", "工控设备", "其他",
+	"路由器防火墙", "光猫", "网络存储", "IP电话", "门禁考勤", "智能设备", "工控设备", "其他",
 }
 
 func isCategory(c string) bool {
@@ -106,7 +106,7 @@ func (s *Server) optContext() (string, map[string]interface{}) {
 		cfg.Ping.IntervalMs, cfg.Ping.LatencyWarnMs, cfg.Ping.LossWarnPct, cfg.Alert.Enabled && cfg.Alert.WebhookURL != "", cfg.Schedule.Describe())
 	fmt.Fprintf(&b, "网关：%s\n\n", t.Site.Gateway)
 
-	b.WriteString("【交换机】id | 名称 | 角色 | IP | 厂商/型号 | 位置 | 告警 | 状态 | 下挂节点数\n")
+	b.WriteString("【网络设备（交换机/路由器/防火墙/光猫/AP 等）】id | 名称 | 类型 | 角色 | IP | 厂商/型号 | 位置 | 告警 | 状态 | 下挂节点数\n")
 	attached := map[string]int{}
 	for _, n := range t.Nodes {
 		attached[n.Attach.Switch]++
@@ -116,7 +116,7 @@ func (s *Server) optContext() (string, map[string]interface{}) {
 		if x, ok := sts[sw.ID]; ok {
 			st = x.State
 		}
-		fmt.Fprintf(&b, "%s | %s | %s | %s | %s %s | %s | %v | %s | %d\n", sw.ID, sw.Name, sw.Role, orDefault(sw.IP, "无IP"), sw.Vendor, sw.Model, sw.Location, sw.Monitor.Alert, st, attached[sw.ID])
+		fmt.Fprintf(&b, "%s | %s | %s | %s | %s | %s %s | %s | %v | %s | %d\n", sw.ID, sw.Name, sw.TypeName(), sw.Role, orDefault(sw.IP, "无IP"), sw.Vendor, sw.Model, sw.Location, sw.Monitor.Alert, st, attached[sw.ID])
 	}
 
 	b.WriteString("\n【终端节点】id | IP | MAC | 厂商 | 主机名 | 名称 | 位置 | 接线 | 同端口台数 | 标记 | 标签 | 备注 | 告警 | 阈值(延迟ms/丢包%) | 当前状态 | 7天丢包% | 7天平均ms | 7天峰值ms | 7天中断分钟 | 7天异常次数 | 24h丢包%\n")

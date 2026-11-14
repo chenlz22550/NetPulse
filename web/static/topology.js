@@ -14,6 +14,26 @@
 
   const FLAG_TAGS = { gateway: '默认网关', suspect: '存疑', unlocated: '未定位', jump_host: '跳板机', no_ipv4: '无 IPv4', critical: '关键', discovered: '自动发现', ai_discovered: 'AI 发现' };
 
+  // 网络设备类型（与服务器 topology.DeviceTypes 一致）：code 显示在设备头部，icon 为 12×12 的线条图标，ports 是新建时的默认端口
+  const DEV_TYPES = {
+    switch: { name: '交换机', code: 'SWITCH', ports: '', icon: '<path d="M1 3.5h9.5M8.5 1.5l2 2-2 2M11 8.5H1.5M3.5 6.5l-2 2 2 2"/>' },
+    router: { name: '路由器', code: 'ROUTER', ports: 'WAN LAN1-4', icon: '<circle cx="6" cy="6" r="5.2"/><path d="M6 2.6v6.8M2.6 6h6.8M4.8 3.8L6 2.6l1.2 1.2M4.8 8.2L6 9.4l1.2-1.2M3.8 4.8L2.6 6l1.2 1.2M8.2 4.8L9.4 6 8.2 7.2"/>' },
+    firewall: { name: '防火墙', code: 'FIREWALL', ports: 'WAN1 WAN2 LAN1-6', icon: '<rect x=".7" y="1" width="10.6" height="10" rx=".5"/><path d="M.7 4.3h10.6M.7 7.7h10.6M4 1v3.3M8 4.3v3.4M4 7.7V11"/>' },
+    gateway: { name: '上网行为管理', code: 'GATEWAY', ports: 'WAN1 LAN1-4', icon: '<path d="M6 .8l4.8 1.9V6c0 2.9-2.3 4.6-4.8 5.3C3.5 10.6 1.2 8.9 1.2 6V2.7z"/><path d="M3.8 6l1.6 1.6L8.4 4.6"/>' },
+    modem: { name: '光猫', code: 'ONT', ports: 'PON LAN1-4', icon: '<rect x=".7" y="5.5" width="10.6" height="5.5" rx="1"/><path d="M3 5.5V1.2M3 1.2c1.5 0 2.5 1 2.5 2.3"/><circle cx="7.5" cy="8.3" r=".6"/><circle cx="9.4" cy="8.3" r=".6"/>' },
+    ap: { name: '无线AP', code: 'AP', ports: 'ETH0', icon: '<path d="M.8 4.6a7.4 7.4 0 0 1 10.4 0M2.8 6.8a4.5 4.5 0 0 1 6.4 0M4.8 9a1.7 1.7 0 0 1 2.4 0"/><circle cx="6" cy="10.6" r=".5"/>' },
+    ac: { name: '无线控制器', code: 'AC', ports: '1-8', icon: '<rect x=".7" y="6.5" width="10.6" height="4.5" rx=".5"/><path d="M2.2 3.4a5.4 5.4 0 0 1 7.6 0M4 5.2a2.8 2.8 0 0 1 4 0"/>' },
+    lb: { name: '负载均衡', code: 'LB', ports: '1-8', icon: '<path d="M.8 6h3.6M4.4 6L11 1.8M4.4 6H11M4.4 6L11 10.2"/><circle cx="4.4" cy="6" r="1.1"/>' },
+    other: { name: '网络设备', code: 'NETDEV', ports: '', icon: '<rect x=".7" y="2.5" width="10.6" height="7" rx="1"/><path d="M3 6h.01M6 6h.01M9 6h.01"/>' },
+  };
+  const devType = sw => (sw && DEV_TYPES[sw.type]) ? sw.type : 'switch';
+  // 独立的小图标（图例、表格用）
+  function typeIcon(type, size) {
+    const t = DEV_TYPES[type] ? type : 'switch';
+    size = size || 14;
+    return `<svg class="ticon-svg t-${t}" width="${size}" height="${size}" viewBox="-.5 -.5 13 13" aria-hidden="true">${DEV_TYPES[t].icon}</svg>`;
+  }
+
   function trunc(s, n) { s = String(s || ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; }
   // 按显示宽度截断：中文等宽字符算 1.7 个西文字符宽
   function truncW(s, max) {
@@ -80,7 +100,7 @@
           });
           y += PITCH;
         }
-        faces.push({ kind: blk.kind, y0: top - 5, y1: y + 3 });
+        faces.push({ kind: blk.kind, pon: blk.ports.every(p => /pon/i.test(p)), y0: top - 5, y1: y + 3 });
       });
       const h = y - pos.y + 10 + SW_FOOT;
       L.switches[sw.id] = { sw, x: pos.x, y: pos.y, w: W, h, side, cols, rows, jacks, faces, rowByPort: {},
@@ -341,9 +361,14 @@
   // ---------------------------------------------------------------------------
   // 交换机竖放：端口按实物排列（每对端口左奇右偶，每 8 口一组），光口单独一组放在下方
   function portKind(name) {
-    return /^(te|tf|tg|xg|xge|ten|sfp|fo|forty|hu|twe|25g|40g|100g)/i.test(String(name)) ? 'sfp' : 'rj45';
+    return /^(te|tf|tg|xg|xge|ten|sfp|fo|forty|hu|twe|25g|40g|100g|pon|gpon|epon|xpon)/i.test(String(name)) ? 'sfp' : 'rj45';
   }
-  function shortPort(p) { const m = String(p).match(/(\d+)\s*$/); return m ? m[1] : String(p).slice(-3); }
+  function shortPort(p) {
+    // 路由器、防火墙、光猫常见的 WAN1 / LAN1 / ETH0 保留首字母，避免 WAN1 与 LAN1 都显示成 1
+    const w = String(p).match(/^(wan|lan|eth|pon|ge|fe)(\d+)$/i);
+    if (w) return w[1][0].toUpperCase() + w[2];
+    const m = String(p).match(/(\d+)\s*$/); return m ? m[1] : String(p).slice(-3);
+  }
 
   function portBlocks(sw, used) {
     const list = (sw.ports || []).slice();
@@ -415,14 +440,19 @@
     const sel = ctx.sel && ctx.sel.kind === 'switch' && ctx.sel.id === sw.id;
     const st = sw.ip ? ctx.status(sw.id) : null;
     const R = S.x + S.w, cx = S.x + S.w / 2;
-    let s = `<g class="sw ${dark ? 'sw-dark' : 'sw-light'}${sel ? ' sel' : ''}">`;
+    const type = devType(sw), T = DEV_TYPES[type];
+    let s = `<g class="sw ${dark ? 'sw-dark' : 'sw-light'} t-${type}${sel ? ' sel' : ''}">`;
     s += `<rect class="sw-body${dark ? '' : ' light'}" x="${S.x}" y="${S.y}" width="${S.w}" height="${S.h}" rx="3"/>`;
     s += `<rect class="sw-cap" x="${S.x}" y="${S.y}" width="${S.w}" height="4" rx="2"/>`;
     // 头部（拖动手柄）
     s += `<g class="head" data-kind="switch" data-id="${esc(sw.id)}">`;
     s += `<rect x="${S.x}" y="${S.y}" width="${S.w}" height="${SW_HEAD - 6}" fill="transparent"/>`;
-    const roleTxt = ({ core: 'CORE', aggregation: 'AGG', access: 'ACCESS', other: 'SWITCH' }[sw.role] || 'SWITCH') + (sw.layer ? ' · ' + sw.layer : '');
-    s += `<text class="role" x="${S.x + 8}" y="${S.y + 17}">${esc(roleTxt)}</text>`;
+    // 交换机显示角色（CORE / AGG / ACCESS），其他设备显示类型（FIREWALL、ONT…）；左侧是类型图标
+    const code = type === 'switch' ? ({ core: 'CORE', aggregation: 'AGG', access: 'ACCESS', other: 'SWITCH' }[sw.role] || 'SWITCH') : T.code;
+    const maxLen = sw.monitor && sw.monitor.alert ? 8 : 12;
+    const roleTxt = code + (sw.layer && code.length + sw.layer.length + 3 <= maxLen ? ' · ' + sw.layer : '');
+    s += `<g class="ticon" transform="translate(${S.x + 8},${S.y + 8})">${T.icon}</g>`;
+    s += `<text class="role" x="${S.x + 25}" y="${S.y + 17}">${esc(roleTxt)}</text>`;
     if (sw.monitor && sw.monitor.alert) {
       s += `<rect class="tag-bg al" x="${R - 34}" y="${S.y + 8}" width="28" height="13"/><text class="tag" x="${R - 20}" y="${S.y + 18}" text-anchor="middle">告警</text>`;
     }
@@ -440,13 +470,13 @@
       const lx = R - 30 + i * 18;
       s += `<circle class="led ${l}" cx="${lx}" cy="${S.y + 52}" r="2.4"/><text class="ledt" x="${lx}" y="${S.y + 63}" text-anchor="middle">${t}</text>`;
     });
-    s += `<title>${esc([sw.name, brand, sw.ip, sw.mac, sw.location, sw.note].filter(Boolean).join('\n'))}</title></g>`;
+    s += `<title>${esc([sw.name, T.name, brand, sw.ip, sw.mac, sw.location, sw.note].filter(Boolean).join('\n'))}</title></g>`;
     s += `<line class="sw-sep" x1="${S.x + 6}" x2="${R - 6}" y1="${S.y + SW_HEAD - 8}" y2="${S.y + SW_HEAD - 8}"/>`;
     // 端口面板底板
     S.faces.forEach(f => {
       const half = (f.kind === 'sfp' ? SFPW : JW) + COLGAP / 2 + 15;
       s += `<rect class="pn-face" x="${cx - half}" y="${f.y0}" width="${half * 2}" height="${f.y1 - f.y0}" rx="2"/>`;
-      if (f.kind === 'sfp') s += `<text class="pn-num" x="${cx}" y="${f.y0 - 3}" text-anchor="middle">SFP</text>`;
+      if (f.kind === 'sfp') s += `<text class="pn-num" x="${cx}" y="${f.y0 - 3}" text-anchor="middle">${f.pon ? 'PON' : 'SFP'}</text>`;
     });
     // 跳线：从网口引到机身边缘（先画，网口盖在上面）
     const states = {};
@@ -705,4 +735,5 @@
 
   window.TopoView = TopoView;
   window.TopoFlags = FLAG_TAGS;
+  window.TopoTypes = { list: Object.keys(DEV_TYPES), info: DEV_TYPES, of: devType, name: sw => DEV_TYPES[devType(sw)].name, icon: typeIcon };
 })();
