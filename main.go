@@ -30,7 +30,7 @@ import (
 	"netping/internal/tray"
 )
 
-var version = "1.5.0"
+var version = "1.6.0"
 
 //go:embed docs/topology-fields.md
 var docsMD []byte

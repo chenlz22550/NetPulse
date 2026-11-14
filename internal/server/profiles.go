@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -56,6 +57,18 @@ func (s *Server) syncActiveRoomSettings(c config.Config) error {
 	return s.Profiles.SaveActiveSettings(c.RoomSettings())
 }
 
+func (s *Server) withBoundProfileEpoch(ctx context.Context, profileID string, epoch int64) context.Context {
+	if s.Profiles == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, aiEpochKey{}, aiSessionEpoch{profileID: profileID, epoch: epoch})
+}
+
+func (s *Server) boundProfileEpoch(ctx context.Context) (string, int64, bool) {
+	snap, ok := ctx.Value(aiEpochKey{}).(aiSessionEpoch)
+	return snap.profileID, snap.epoch, ok
+}
+
 func (s *Server) withProfileEpoch(ctx context.Context) context.Context {
 	if s.Profiles == nil {
 		return ctx
@@ -65,6 +78,23 @@ func (s *Server) withProfileEpoch(ctx context.Context) context.Context {
 	}
 	id, ep := s.Profiles.ActiveState()
 	return context.WithValue(ctx, aiEpochKey{}, aiSessionEpoch{profileID: id, epoch: ep})
+}
+
+func (s *Server) checkActiveBindingLocked(wantProfileID string, wantEpoch *int64) (string, int64, error) {
+	activeID, epoch := s.activeProfileState()
+	if wantProfileID != "" && wantProfileID != activeID {
+		return activeID, epoch, &apiError{
+			status: http.StatusConflict,
+			msg:    fmt.Sprintf("当前操作仅支持当前激活机房（请求 %q，当前激活 %q，epoch=%d）", wantProfileID, activeID, epoch),
+		}
+	}
+	if wantEpoch != nil && *wantEpoch != epoch {
+		return activeID, epoch, &apiError{
+			status: http.StatusConflict,
+			msg:    fmt.Sprintf("机房版本 epoch 已变化（请求 %d，当前 %d），请刷新后重试", *wantEpoch, epoch),
+		}
+	}
+	return activeID, epoch, nil
 }
 
 func (s *Server) checkProfileEpoch(ctx context.Context) error {

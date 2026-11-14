@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"netping/internal/config"
 	"netping/internal/llm"
 	"netping/internal/topology"
 )
@@ -424,6 +425,118 @@ func buildOptResult(t *topology.Topology, raw *optRaw) map[string]interface{} {
 // ---------------------------------------------------------------------------
 // HTTP
 
+type optClassifyReq struct {
+	ID       string `json:"id"`
+	Category string `json:"category"`
+}
+
+type optApplyReq struct {
+	ProfileID string           `json:"profile_id,omitempty"`
+	Epoch     *int64           `json:"epoch,omitempty"`
+	Classify  []optClassifyReq `json:"classify,omitempty"`
+	Config    []optItem        `json:"config,omitempty"`
+	Restore   []devSnap        `json:"restore,omitempty"` // 撤销：恢复为之前的快照
+}
+
+func (s *Server) collectOptSnapshot(wantProfileID string, wantEpoch *int64) (ctxText string, stats map[string]interface{}, site string, profileID string, epoch int64, err error) {
+	done := s.Topo.ProfileWork()
+	defer done()
+	profileID, epoch, err = s.checkActiveBindingLocked(wantProfileID, wantEpoch)
+	if err != nil {
+		return "", nil, "", profileID, epoch, err
+	}
+	ctxText, stats = s.optContext()
+	t, _ := s.Topo.Snapshot()
+	site = t.Site.Name
+	if t.Site.Subnet != "" {
+		site += "（" + t.Site.Subnet + "）"
+	}
+	return ctxText, stats, site, profileID, epoch, nil
+}
+
+func (s *Server) buildOptResultWithEpoch(ctx context.Context, raw *optRaw, summary, boundID string, boundEpoch int64) (map[string]interface{}, error) {
+	done := s.Topo.ProfileWork()
+	defer done()
+	if err := s.checkProfileEpoch(ctx); err != nil {
+		return nil, err
+	}
+	t, rev := s.Topo.Snapshot()
+	out := buildOptResult(t, raw)
+	out["summary"] = summary
+	out["rev"] = rev
+	out["profile_id"] = boundID
+	out["epoch"] = boundEpoch
+	out["time"] = time.Now().Format("2006-01-02 15:04:05")
+	return out, nil
+}
+
+// generateOptimizeSuggestions runs AI one-click optimization and binds the result to the active profile_id + epoch.
+func (s *Server) generateOptimizeSuggestions(ctx context.Context, remote string, emit func(map[string]interface{})) (map[string]interface{}, llm.Usage, int, int64, string, error) {
+	return s.generateOptimizeSuggestionsWithBinding(ctx, "", nil, remote, emit)
+}
+
+func (s *Server) generateOptimizeSuggestionsWithBinding(ctx context.Context, wantProfileID string, wantEpoch *int64, remote string, emit func(map[string]interface{})) (map[string]interface{}, llm.Usage, int, int64, string, error) {
+	c := s.Cfg.Get()
+	if !c.AI.Enabled {
+		return nil, llm.Usage{}, 0, 0, "", badRequest("AI 诊断未启用（在「AI 诊断」页开启）")
+	}
+	if c.AI.APIKey == "" {
+		return nil, llm.Usage{}, 0, 0, "", badRequest("尚未设置 API Key，请先在「AI 诊断」页右侧填写")
+	}
+	select {
+	case aiSem <- struct{}{}:
+		defer func() { <-aiSem }()
+	default:
+		return nil, llm.Usage{}, 0, 0, "", &apiError{status: http.StatusTooManyRequests, msg: "同时进行的 AI 分析太多，请稍后再试"}
+	}
+	return s.generateOptimizeSuggestionsCore(ctx, c, wantProfileID, wantEpoch, remote, emit)
+}
+
+func (s *Server) generateOptimizeSuggestionsCore(ctx context.Context, c config.Config, wantProfileID string, wantEpoch *int64, remote string, emit func(map[string]interface{})) (map[string]interface{}, llm.Usage, int, int64, string, error) {
+	start := time.Now()
+	timeout := time.Duration(c.AI.TimeoutSec) * time.Second
+	if timeout < 3*time.Minute {
+		timeout = 3 * time.Minute // 设备多时输出较长
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	if emit != nil {
+		emit(map[string]interface{}{"t": "status", "text": "正在汇总设备资料和近 7 天历史数据…"})
+	}
+	ctxText, stats, site, boundID, boundEpoch, err := s.collectOptSnapshot(wantProfileID, wantEpoch)
+	if err != nil {
+		return nil, llm.Usage{}, 0, 0, c.AI.Model, err
+	}
+	ctx = s.withBoundProfileEpoch(ctx, boundID, boundEpoch)
+	if emit != nil {
+		emit(map[string]interface{}{"t": "stats", "stats": stats})
+	}
+	msgs := []llm.Message{
+		{Role: "system", Content: optSystemPrompt(site)},
+		{Role: "user", Content: ctxText + "\n请按要求给出设备分类、配置建议和需要检查的设备。"},
+	}
+	res, err := s.aiLoop(ctx, c, msgs, optMaxRounds, optMaxTokens, remote, emit)
+	if err != nil {
+		return nil, llm.Usage{}, 0, time.Since(start).Milliseconds(), c.AI.Model, err
+	}
+	js, summary := extractJSON(res.Final)
+	var raw optRaw
+	if js == "" || json.Unmarshal([]byte(js), &raw) != nil {
+		return nil, res.Usage, res.Calls, time.Since(start).Milliseconds(), c.AI.Model,
+			fmt.Errorf("模型返回的结果格式不正确（可能输出被截断，%d 字），请重试；设备很多时可在「AI 诊断」页关闭深度思考或换用输出更长的模型。", utf8.RuneCountInString(res.Final))
+	}
+	if summary == "" {
+		summary = raw.Summary
+	}
+	out, err := s.buildOptResultWithEpoch(ctx, &raw, summary, boundID, boundEpoch)
+	if err != nil {
+		return nil, res.Usage, res.Calls, time.Since(start).Milliseconds(), c.AI.Model, err
+	}
+	ms := time.Since(start).Milliseconds()
+	return out, res.Usage, res.Calls, ms, c.AI.Model, nil
+}
+
 func (s *Server) handleAIOptimize(w http.ResponseWriter, r *http.Request) error {
 	c := s.Cfg.Get()
 	if !c.AI.Enabled {
@@ -450,27 +563,7 @@ func (s *Server) handleAIOptimize(w http.ResponseWriter, r *http.Request) error 
 			fl.Flush()
 		}
 	}
-	start := time.Now()
-	timeout := time.Duration(c.AI.TimeoutSec) * time.Second
-	if timeout < 3*time.Minute {
-		timeout = 3 * time.Minute // 设备多时输出较长
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), timeout)
-	defer cancel()
-
-	emit(map[string]interface{}{"t": "status", "text": "正在汇总设备资料和近 7 天历史数据…"})
-	ctxText, stats := s.optContext()
-	emit(map[string]interface{}{"t": "stats", "stats": stats})
-	t, _ := s.Topo.Snapshot()
-	site := t.Site.Name
-	if t.Site.Subnet != "" {
-		site += "（" + t.Site.Subnet + "）"
-	}
-	msgs := []llm.Message{
-		{Role: "system", Content: optSystemPrompt(site)},
-		{Role: "user", Content: ctxText + "\n请按要求给出设备分类、配置建议和需要检查的设备。"},
-	}
-	res, err := s.aiLoop(ctx, c, msgs, optMaxRounds, optMaxTokens, "AI优化/"+clientAddr(r), emit)
+	out, usage, calls, ms, model, err := s.generateOptimizeSuggestionsCore(r.Context(), c, "", nil, "AI优化/"+clientAddr(r), emit)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return nil
@@ -479,27 +572,11 @@ func (s *Server) handleAIOptimize(w http.ResponseWriter, r *http.Request) error 
 		emit(map[string]interface{}{"t": "error", "error": err.Error()})
 		return nil
 	}
-	js, summary := extractJSON(res.Final)
-	var raw optRaw
-	if js == "" || json.Unmarshal([]byte(js), &raw) != nil {
-		log.Printf("AI 一键优化：模型返回格式不正确（%d 字）", utf8.RuneCountInString(res.Final))
-		emit(map[string]interface{}{"t": "error", "error": "模型返回的结果格式不正确（可能输出被截断），请重试；设备很多时可在「AI 诊断」页关闭深度思考或换用输出更长的模型。"})
-		return nil
-	}
-	if summary == "" {
-		summary = raw.Summary
-	}
-	t, rev := s.Topo.Snapshot()
-	out := buildOptResult(t, &raw)
-	out["summary"] = summary
-	out["rev"] = rev
-	out["time"] = time.Now().Format("2006-01-02 15:04:05")
-	ms := time.Since(start).Milliseconds()
 	log.Printf("AI 一键优化（%s，%s）：分类 %d 组、建议 %d 条、待检查 %d 台 —— 工具 %d 次，%d tokens，%.1f 秒",
-		clientAddr(r), c.AI.Model, len(out["classify"].([]map[string]interface{})), len(out["config"].([]optItem)),
-		len(out["check"].([]map[string]interface{})), res.Calls, res.Usage.TotalTokens, float64(ms)/1000)
+		clientAddr(r), model, len(out["classify"].([]map[string]interface{})), len(out["config"].([]optItem)),
+		len(out["check"].([]map[string]interface{})), calls, usage.TotalTokens, float64(ms)/1000)
 	emit(map[string]interface{}{"t": "result", "result": out})
-	emit(map[string]interface{}{"t": "done", "usage": res.Usage, "tools": res.Calls, "ms": ms, "model": c.AI.Model})
+	emit(map[string]interface{}{"t": "done", "usage": usage, "tools": calls, "ms": ms, "model": model})
 	return nil
 }
 
@@ -523,108 +600,175 @@ func snapOf(t *topology.Topology, id string) (devSnap, bool) {
 	return devSnap{}, false
 }
 
-func (s *Server) handleAIOptimizeApply(w http.ResponseWriter, r *http.Request) error {
-	defer s.Topo.ProfileWork()()
-	var req struct {
-		Classify []struct {
-			ID       string `json:"id"`
-			Category string `json:"category"`
-		} `json:"classify"`
-		Config  []optItem `json:"config"`
-		Restore []devSnap `json:"restore"` // 撤销：恢复为之前的快照
+func applyOptOnTopology(t *topology.Topology, req optApplyReq) (undo []devSnap, changedIDs []string, skipped []string, plan []map[string]interface{}) {
+	snapped := map[string]bool{}
+	changed := map[string]bool{}
+	plan = []map[string]interface{}{}
+	skipped = []string{}
+	snap := func(id string) {
+		if !snapped[id] {
+			if sn, ok := snapOf(t, id); ok {
+				undo = append(undo, sn)
+				snapped[id] = true
+			}
+		}
 	}
-	if err := decode(r, &req); err != nil {
-		return err
+	for _, sn := range req.Restore {
+		snap(sn.ID)
+		if n := t.FindNode(sn.ID); n != nil {
+			n.Name, n.Tags, n.Flags, n.Monitor = sn.Name, append([]string(nil), sn.Tags...), append([]string(nil), sn.Flags...), sn.Monitor
+			changed[sn.ID] = true
+			plan = append(plan, map[string]interface{}{"id": sn.ID, "kind": "node", "action": "restore", "change": "恢复节点快照"})
+		} else if sw := t.FindSwitch(sn.ID); sw != nil {
+			sw.Name, sw.Monitor = sn.Name, sn.Monitor
+			changed[sn.ID] = true
+			plan = append(plan, map[string]interface{}{"id": sn.ID, "kind": "switch", "action": "restore", "change": "恢复交换机快照"})
+		} else {
+			skipped = append(skipped, sn.ID)
+		}
+	}
+	for _, c := range req.Classify {
+		n := t.FindNode(c.ID)
+		if n == nil || !isCategory(c.Category) {
+			skipped = append(skipped, c.ID)
+			continue
+		}
+		if nodeCategory(n) == c.Category {
+			continue
+		}
+		snap(c.ID)
+		tags := []string{}
+		for _, tg := range n.Tags {
+			if !isCategory(tg) {
+				tags = append(tags, tg)
+			}
+		}
+		n.Tags = append(tags, c.Category)
+		changed[c.ID] = true
+		plan = append(plan, map[string]interface{}{"id": c.ID, "kind": "node", "action": "classify", "change": "分类 → " + c.Category})
+	}
+	for _, it := range req.Config {
+		if !checkItem(t, &it) || !it.Applicable {
+			skipped = append(skipped, it.ID)
+			continue
+		}
+		snap(it.ID)
+		_, mon, _ := devMon(t, it.ID)
+		switch it.Action {
+		case "alert_on", "alert_off":
+			mon.Alert = it.Action == "alert_on"
+		case "flag_critical":
+			n := t.FindNode(it.ID)
+			n.Flags = append(n.Flags, "critical")
+		case "rename":
+			if n := t.FindNode(it.ID); n != nil {
+				n.Name = it.Name
+			} else {
+				t.FindSwitch(it.ID).Name = it.Name
+			}
+		case "thresholds":
+			if it.LatencyWarnMs > 0 {
+				mon.LatencyWarnMs = it.LatencyWarnMs
+			}
+			if it.LossWarnPct > 0 {
+				mon.LossWarnPct = it.LossWarnPct
+			}
+		case "interval":
+			mon.IntervalMs = it.IntervalMs
+		case "monitor_off":
+			f := false
+			mon.Enabled = &f
+		}
+		changed[it.ID] = true
+		plan = append(plan, map[string]interface{}{"id": it.ID, "kind": it.Kind, "action": it.Action, "label": it.Label, "change": it.Change})
+	}
+	for id := range changed {
+		changedIDs = append(changedIDs, id)
+	}
+	sort.Strings(changedIDs)
+	return undo, changedIDs, skipped, plan
+}
+
+func (s *Server) applyOptimizeSuggestions(req optApplyReq, dryRun bool, requireBinding bool, source string) (map[string]interface{}, error) {
+	defer s.Topo.ProfileWork()()
+
+	curProfileID, curEpoch := s.activeProfileState()
+	if requireBinding {
+		reqPID := strings.TrimSpace(req.ProfileID)
+		if reqPID == "" || req.Epoch == nil {
+			return nil, badRequest("必须提供 profile_id 和 epoch 以确保仅作用于生成时的机房版本")
+		}
+		if reqPID != curProfileID || *req.Epoch != curEpoch {
+			return nil, &apiError{
+				status: http.StatusConflict,
+				msg:    fmt.Sprintf("机房或配置版本已变化：请求绑定 %s (epoch=%d)，当前激活 %s (epoch=%d)，请重新生成优化建议", reqPID, *req.Epoch, curProfileID, curEpoch),
+			}
+		}
 	}
 	if len(req.Classify)+len(req.Config)+len(req.Restore) == 0 {
-		return badRequest("没有选择任何建议")
+		return nil, badRequest("没有选择任何建议")
 	}
+
+	if dryRun {
+		t, rev := s.Topo.Snapshot()
+		undo, changedIDs, skipped, plan := applyOptOnTopology(t, req)
+		return map[string]interface{}{
+			"dry_run":      true,
+			"profile_id":   curProfileID,
+			"epoch":        curEpoch,
+			"rev":          rev,
+			"changed":      len(changedIDs),
+			"changed_ids":  changedIDs,
+			"skipped":      len(skipped),
+			"skipped_ids":  skipped,
+			"plan":         plan,
+			"undo_preview": undo,
+		}, nil
+	}
+
 	var undo []devSnap
-	changed := map[string]bool{}
-	var skipped []string
+	var changedIDs, skipped []string
+	var plan []map[string]interface{}
 	err := s.Topo.Update(func(t *topology.Topology) error {
-		snapped := map[string]bool{}
-		snap := func(id string) {
-			if !snapped[id] {
-				if sn, ok := snapOf(t, id); ok {
-					undo = append(undo, sn)
-					snapped[id] = true
-				}
-			}
-		}
-		for _, sn := range req.Restore {
-			snap(sn.ID)
-			if n := t.FindNode(sn.ID); n != nil {
-				n.Name, n.Tags, n.Flags, n.Monitor = sn.Name, sn.Tags, sn.Flags, sn.Monitor
-				changed[sn.ID] = true
-			} else if sw := t.FindSwitch(sn.ID); sw != nil {
-				sw.Name, sw.Monitor = sn.Name, sn.Monitor
-				changed[sn.ID] = true
-			}
-		}
-		for _, c := range req.Classify {
-			n := t.FindNode(c.ID)
-			if n == nil || !isCategory(c.Category) {
-				skipped = append(skipped, c.ID)
-				continue
-			}
-			if nodeCategory(n) == c.Category {
-				continue
-			}
-			snap(c.ID)
-			tags := []string{}
-			for _, tg := range n.Tags {
-				if !isCategory(tg) {
-					tags = append(tags, tg)
-				}
-			}
-			n.Tags = append(tags, c.Category)
-			changed[c.ID] = true
-		}
-		for _, it := range req.Config {
-			if !checkItem(t, &it) || !it.Applicable {
-				skipped = append(skipped, it.ID)
-				continue
-			}
-			snap(it.ID)
-			_, mon, _ := devMon(t, it.ID)
-			switch it.Action {
-			case "alert_on", "alert_off":
-				mon.Alert = it.Action == "alert_on"
-			case "flag_critical":
-				n := t.FindNode(it.ID)
-				n.Flags = append(n.Flags, "critical")
-			case "rename":
-				if n := t.FindNode(it.ID); n != nil {
-					n.Name = it.Name
-				} else {
-					t.FindSwitch(it.ID).Name = it.Name
-				}
-			case "thresholds":
-				if it.LatencyWarnMs > 0 {
-					mon.LatencyWarnMs = it.LatencyWarnMs
-				}
-				if it.LossWarnPct > 0 {
-					mon.LossWarnPct = it.LossWarnPct
-				}
-			case "interval":
-				mon.IntervalMs = it.IntervalMs
-			case "monitor_off":
-				f := false
-				mon.Enabled = &f
-			}
-			changed[it.ID] = true
-		}
+		undo, changedIDs, skipped, plan = applyOptOnTopology(t, req)
 		return nil
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	verb := "应用 AI 优化建议"
 	if len(req.Restore) > 0 {
 		verb = "撤销 AI 优化"
 	}
-	log.Printf("%s（来源 %s）：修改 %d 台设备，跳过 %d 条", verb, clientAddr(r), len(changed), len(skipped))
-	s.okRev(w, map[string]interface{}{"changed": len(changed), "skipped": len(skipped), "undo": undo})
+	log.Printf("%s（来源 %s）：修改 %d 台设备，跳过 %d 条", verb, source, len(changedIDs), len(skipped))
+	_, rev := s.Topo.Snapshot()
+	return map[string]interface{}{
+		"dry_run":     false,
+		"profile_id":  curProfileID,
+		"epoch":       curEpoch,
+		"rev":         rev,
+		"changed":     len(changedIDs),
+		"changed_ids": changedIDs,
+		"skipped":     len(skipped),
+		"skipped_ids": skipped,
+		"plan":        plan,
+		"undo":        undo,
+	}, nil
+}
+
+func (s *Server) handleAIOptimizeApply(w http.ResponseWriter, r *http.Request) error {
+	var req optApplyReq
+	if err := decode(r, &req); err != nil {
+		return err
+	}
+	res, err := s.applyOptimizeSuggestions(req, false, false, clientAddr(r))
+	if err != nil {
+		return err
+	}
+	s.okRev(w, map[string]interface{}{
+		"changed": res["changed"],
+		"skipped": res["skipped"],
+		"undo":    res["undo"],
+	})
 	return nil
 }

@@ -482,6 +482,9 @@ func (s *Server) aiLoop(ctx context.Context, c config.Config, msgs []llm.Message
 
 // aiLoopWith 同 aiLoop，可指定允许的工具和工具调用次数上限。
 func (s *Server) aiLoopWith(ctx context.Context, c config.Config, msgs []llm.Message, names []string, maxRounds, maxCalls, maxTokens int, remote string, emit func(map[string]interface{})) (aiRunResult, error) {
+	if emit == nil {
+		emit = func(map[string]interface{}) {}
+	}
 	ctx = s.withProfileEpoch(ctx)
 	cl := s.aiClient(c)
 	tools := s.aiToolDefs(names)
@@ -537,13 +540,23 @@ func (s *Server) aiExecCallsIn(names []string, calls []llm.ToolCall, remote, pha
 	return out
 }
 
+func (s *Server) runAIToolWithEpochLocked(ctx context.Context, names []string, name, argsJSON, remote string) (string, string, error) {
+	done := s.Topo.ProfileWork()
+	defer done()
+	if err := s.checkProfileEpoch(ctx); err != nil {
+		return "", "", err
+	}
+	title, result := s.runAIToolIn(names, name, argsJSON, remote)
+	return title, result, nil
+}
+
 func (s *Server) aiExecCallsInCtx(ctx context.Context, names []string, calls []llm.ToolCall, remote, phase string, emit func(map[string]interface{})) ([]llm.Message, error) {
 	out := make([]llm.Message, 0, len(calls))
 	for _, tc := range calls {
-		if err := s.checkProfileEpoch(ctx); err != nil {
+		title, result, err := s.runAIToolWithEpochLocked(ctx, names, tc.Function.Name, tc.Function.Arguments, remote)
+		if err != nil {
 			return out, err
 		}
-		title, result := s.runAIToolIn(names, tc.Function.Name, tc.Function.Arguments, remote)
 		ev := map[string]interface{}{"t": "tool", "name": tc.Function.Name, "title": title, "args": truncRunes(tc.Function.Arguments, 300)}
 		if phase != "" {
 			ev["phase"] = phase

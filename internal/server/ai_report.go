@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"log"
 	"net/http"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"unicode/utf8"
 
 	"netping/internal/alert"
+	"netping/internal/config"
 	"netping/internal/llm"
 )
 
@@ -670,6 +672,180 @@ func (s *Server) loadReport(id string) (*Report, error) {
 // ---------------------------------------------------------------------------
 // HTTP
 
+func (s *Server) collectReportBoundLocked(wantProfileID string, wantEpoch *int64, rg string, now time.Time) (*rptData, string, string, int64, error) {
+	done := s.Topo.ProfileWork()
+	defer done()
+	activeID, epoch, err := s.checkActiveBindingLocked(wantProfileID, wantEpoch)
+	if err != nil {
+		return nil, "", activeID, epoch, err
+	}
+	d, err := s.collectReport(rg, now)
+	if err != nil {
+		return nil, "", activeID, epoch, err
+	}
+	return d, d.contextText(s), activeID, epoch, nil
+}
+
+func (s *Server) saveReportWithEpoch(ctx context.Context, rp *Report) (bool, error) {
+	done := s.Topo.ProfileWork()
+	defer done()
+	if err := s.checkProfileEpoch(ctx); err != nil {
+		return true, err
+	}
+	return false, s.saveReport(rp)
+}
+
+// generateAIReportWithBinding runs the AI operational report loop atomically bound to the active profile+epoch.
+func (s *Server) generateAIReportWithBinding(ctx context.Context, wantProfileID string, wantEpoch *int64, rg, note, remote string, emit func(map[string]interface{})) (*Report, llm.Usage, int, int64, string, string, int64, error) {
+	c := s.Cfg.Get()
+	if !c.AI.Enabled {
+		return nil, llm.Usage{}, 0, 0, "", "", 0, badRequest("AI 诊断未启用（在「AI 诊断」页开启）")
+	}
+	if c.AI.APIKey == "" {
+		return nil, llm.Usage{}, 0, 0, "", "", 0, badRequest("尚未设置 API Key，请先在「AI 诊断」页右侧填写")
+	}
+	if rg == "" {
+		rg = "24h"
+	}
+	if _, ok := reportRanges[rg]; !ok {
+		return nil, llm.Usage{}, 0, 0, "", "", 0, badRequest("统计周期只能是 24h、7d 或 30d")
+	}
+	select {
+	case aiSem <- struct{}{}:
+		defer func() { <-aiSem }()
+	default:
+		return nil, llm.Usage{}, 0, 0, "", "", 0, &apiError{status: http.StatusTooManyRequests, msg: "同时进行的 AI 分析太多，请稍后再试"}
+	}
+	return s.generateAIReportCore(ctx, c, wantProfileID, wantEpoch, rg, note, remote, emit)
+}
+
+func (s *Server) generateAIReportCore(ctx context.Context, c config.Config, wantProfileID string, wantEpoch *int64, rg, note, remote string, emit func(map[string]interface{})) (*Report, llm.Usage, int, int64, string, string, int64, error) {
+	note = truncRunes(strings.TrimSpace(note), reportMaxNoteRune)
+	timeout := time.Duration(c.AI.TimeoutSec) * time.Second
+	if timeout < 5*time.Minute {
+		timeout = 5 * time.Minute // 报告较长
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	start := time.Now()
+	if emit != nil {
+		emit(map[string]interface{}{"t": "status", "text": "正在统计" + reportRanges[rg].label + "的监控数据…"})
+	}
+	d, ctxText, boundID, boundEpoch, err := s.collectReportBoundLocked(wantProfileID, wantEpoch, rg, start)
+	if err != nil {
+		return nil, llm.Usage{}, 0, 0, c.AI.Model, boundID, boundEpoch, err
+	}
+	ctx = s.withBoundProfileEpoch(ctx, boundID, boundEpoch)
+	k := d.kpi()
+	if emit != nil {
+		emit(map[string]interface{}{"t": "stats", "stats": k})
+	}
+	msgs := []llm.Message{
+		{Role: "system", Content: reportSystemPrompt(d, note)},
+		{Role: "user", Content: ctxText + "\n请按要求撰写运维报告。"},
+	}
+	res, err := s.aiLoopWith(ctx, c, msgs, aiToolNames, reportMaxRounds, reportMaxCalls, reportMaxTokens, remote, emit)
+	if err != nil {
+		return nil, llm.Usage{}, 0, 0, c.AI.Model, boundID, boundEpoch, err
+	}
+	body := strings.TrimSpace(res.Final)
+	if body == "" {
+		return nil, res.Usage, res.Calls, time.Since(start).Milliseconds(), c.AI.Model, boundID, boundEpoch, errors.New("模型没有返回报告内容，请重试。")
+	}
+	// 去掉模型偶尔包裹整篇报告的 ```markdown 代码块
+	if strings.HasPrefix(body, "```markdown") || strings.HasPrefix(body, "```md") {
+		if nl := strings.Index(body, "\n"); nl >= 0 {
+			body = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(body[nl+1:]), "```"))
+		}
+	}
+	defTitle := d.Site + " 网络运维" + d.Kind
+	if !strings.HasPrefix(strings.TrimSpace(body), "# ") {
+		body = "# " + defTitle + "\n\n" + body
+	}
+	ms := time.Since(start).Milliseconds()
+	rp := &Report{
+		ID: start.Format("20060102-150405"), Time: start.Format("2006-01-02 15:04:05"),
+		Range: d.Range, RangeLabel: d.Label, Kind: d.Kind, Site: d.Site, Note: note,
+		From: d.From.Format("2006-01-02 15:04"), To: d.To.Format("2006-01-02 15:04"),
+		Title: reportTitle(body, defTitle), Markdown: body + d.appendix(),
+		Model: c.AI.Model, Tools: res.Calls, Ms: ms, Usage: res.Usage, Summary: k,
+	}
+	if epochErr, err := s.saveReportWithEpoch(ctx, rp); err != nil {
+		if epochErr {
+			return nil, res.Usage, res.Calls, ms, c.AI.Model, boundID, boundEpoch, err
+		}
+		return rp, res.Usage, res.Calls, ms, c.AI.Model, boundID, boundEpoch, err
+	}
+	return rp, res.Usage, res.Calls, ms, c.AI.Model, boundID, boundEpoch, nil
+}
+
+func (s *Server) listReportSummaries(limit int) []map[string]interface{} {
+	list := []map[string]interface{}{}
+	for _, rid := range s.reportIDs() {
+		if limit > 0 && len(list) >= limit {
+			break
+		}
+		rp, err := s.loadReport(rid)
+		if err != nil {
+			continue
+		}
+		list = append(list, map[string]interface{}{
+			"id":          rp.ID,
+			"time":        rp.Time,
+			"title":       rp.Title,
+			"range":       rp.Range,
+			"range_label": rp.RangeLabel,
+			"kind":        rp.Kind,
+			"model":       rp.Model,
+			"summary":     rp.Summary,
+			"note":        rp.Note,
+		})
+	}
+	return list
+}
+
+func exportReportMarkdown(rp *Report) string {
+	generator := "netPing AI（" + rp.Model + "）"
+	if rp.Model == "deterministic" {
+		generator = "netPing 程序统计"
+	}
+	return rp.Markdown + "\n\n> 由 " + generator + " 生成，生成时间 " + rp.Time + "\n"
+}
+
+func exportReportHTML(rp *Report) string {
+	md := exportReportMarkdown(rp)
+	var b strings.Builder
+	b.WriteString("<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">")
+	b.WriteString("<title>")
+	b.WriteString(html.EscapeString(rp.Title))
+	b.WriteString("</title>")
+	b.WriteString("<style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:960px;margin:24px auto;padding:0 16px;line-height:1.6;color:#111827}pre{background:#f3f4f6;padding:12px;border-radius:6px;overflow:auto;white-space:pre-wrap}table{border-collapse:collapse;width:100%;margin:12px 0}th,td{border:1px solid #d1d5db;padding:6px 10px;text-align:left}</style>")
+	b.WriteString("</head><body>")
+	fmt.Fprintf(&b, "<header><p><strong>%s</strong> | %s (%s) | %s ~ %s</p></header>",
+		html.EscapeString(rp.Title),
+		html.EscapeString(rp.Site),
+		html.EscapeString(rp.RangeLabel),
+		html.EscapeString(rp.From),
+		html.EscapeString(rp.To),
+	)
+	b.WriteString("<article><pre>")
+	b.WriteString(html.EscapeString(md))
+	b.WriteString("</pre></article></body></html>")
+	return b.String()
+}
+
+func (s *Server) deleteReport(id string) error {
+	if !reportIDRe.MatchString(id) {
+		return notFound("报告")
+	}
+	if err := os.Remove(filepath.Join(s.reportDir(), id+".json")); err != nil {
+		return notFound("报告")
+	}
+	return nil
+}
+
+// handleAIReport HTTP NDJSON handler wrapper around generateAIReport.
 func (s *Server) handleAIReport(w http.ResponseWriter, r *http.Request) error {
 	c := s.Cfg.Get()
 	if !c.AI.Enabled {
@@ -691,7 +867,6 @@ func (s *Server) handleAIReport(w http.ResponseWriter, r *http.Request) error {
 	if _, ok := reportRanges[req.Range]; !ok {
 		return badRequest("统计周期只能是 24h、7d 或 30d")
 	}
-	req.Note = truncRunes(strings.TrimSpace(req.Note), reportMaxNoteRune)
 	select {
 	case aiSem <- struct{}{}:
 		defer func() { <-aiSem }()
@@ -710,29 +885,17 @@ func (s *Server) handleAIReport(w http.ResponseWriter, r *http.Request) error {
 			fl.Flush()
 		}
 	}
-	start := time.Now()
-	timeout := time.Duration(c.AI.TimeoutSec) * time.Second
-	if timeout < 5*time.Minute {
-		timeout = 5 * time.Minute // 报告较长
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), timeout)
-	defer cancel()
-
-	emit(map[string]interface{}{"t": "status", "text": "正在统计" + reportRanges[req.Range].label + "的监控数据…"})
-	d, err := s.collectReport(req.Range, start)
-	if err != nil {
-		emit(map[string]interface{}{"t": "error", "error": err.Error()})
-		return nil
-	}
-	k := d.kpi()
-	emit(map[string]interface{}{"t": "stats", "stats": k})
-	msgs := []llm.Message{
-		{Role: "system", Content: reportSystemPrompt(d, req.Note)},
-		{Role: "user", Content: d.contextText(s) + "\n请按要求撰写运维报告。"},
-	}
 	remote := "AI报告/" + clientAddr(r)
-	res, err := s.aiLoopWith(ctx, c, msgs, aiToolNames, reportMaxRounds, reportMaxCalls, reportMaxTokens, remote, emit)
+	rp, usage, calls, ms, model, _, _, err := s.generateAIReportCore(r.Context(), c, "", nil, req.Range, req.Note, remote, emit)
 	if err != nil {
+		if rp != nil {
+			log.Printf("保存运维报告失败：%v", err)
+			emit(map[string]interface{}{"t": "warn", "text": "报告已生成，但保存到 data/reports 失败：" + err.Error()})
+			log.Printf("AI 运维报告（%s，%s，%s）：%s —— 工具 %d 次，%d tokens，%.1f 秒", clientAddr(r), model, rp.Kind, rp.ID, calls, usage.TotalTokens, float64(ms)/1000)
+			emit(map[string]interface{}{"t": "report", "report": rp})
+			emit(map[string]interface{}{"t": "done", "usage": usage, "tools": calls, "ms": ms, "model": model})
+			return nil
+		}
 		if errors.Is(err, context.Canceled) {
 			log.Printf("AI 运维报告已取消（%s）", clientAddr(r))
 			return nil
@@ -741,34 +904,9 @@ func (s *Server) handleAIReport(w http.ResponseWriter, r *http.Request) error {
 		emit(map[string]interface{}{"t": "error", "error": err.Error()})
 		return nil
 	}
-	body := strings.TrimSpace(res.Final)
-	if body == "" {
-		emit(map[string]interface{}{"t": "error", "error": "模型没有返回报告内容，请重试。"})
-		return nil
-	}
-	// 去掉模型偶尔包裹整篇报告的 ```markdown 代码块
-	if strings.HasPrefix(body, "```markdown") || strings.HasPrefix(body, "```md") {
-		body = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(body[strings.Index(body, "\n")+1:]), "```"))
-	}
-	defTitle := d.Site + " 网络运维" + d.Kind
-	if !strings.HasPrefix(strings.TrimSpace(body), "# ") {
-		body = "# " + defTitle + "\n\n" + body
-	}
-	ms := time.Since(start).Milliseconds()
-	rp := &Report{
-		ID: start.Format("20060102-150405"), Time: start.Format("2006-01-02 15:04:05"),
-		Range: d.Range, RangeLabel: d.Label, Kind: d.Kind, Site: d.Site, Note: req.Note,
-		From: d.From.Format("2006-01-02 15:04"), To: d.To.Format("2006-01-02 15:04"),
-		Title: reportTitle(body, defTitle), Markdown: body + d.appendix(),
-		Model: c.AI.Model, Tools: res.Calls, Ms: ms, Usage: res.Usage, Summary: k,
-	}
-	if err := s.saveReport(rp); err != nil {
-		log.Printf("保存运维报告失败：%v", err)
-		emit(map[string]interface{}{"t": "warn", "text": "报告已生成，但保存到 data/reports 失败：" + err.Error()})
-	}
-	log.Printf("AI 运维报告（%s，%s，%s）：%s —— 工具 %d 次，%d tokens，%.1f 秒", clientAddr(r), c.AI.Model, d.Kind, rp.ID, res.Calls, res.Usage.TotalTokens, float64(ms)/1000)
+	log.Printf("AI 运维报告（%s，%s，%s）：%s —— 工具 %d 次，%d tokens，%.1f 秒", clientAddr(r), model, rp.Kind, rp.ID, calls, usage.TotalTokens, float64(ms)/1000)
 	emit(map[string]interface{}{"t": "report", "report": rp})
-	emit(map[string]interface{}{"t": "done", "usage": res.Usage, "tools": res.Calls, "ms": ms, "model": c.AI.Model})
+	emit(map[string]interface{}{"t": "done", "usage": usage, "tools": calls, "ms": ms, "model": model})
 	return nil
 }
 
@@ -780,16 +918,7 @@ func (s *Server) handleReports(w http.ResponseWriter, r *http.Request, arg strin
 		if r.Method != http.MethodGet {
 			return notFound("接口")
 		}
-		list := []map[string]interface{}{}
-		for _, rid := range s.reportIDs() {
-			rp, err := s.loadReport(rid)
-			if err != nil {
-				continue
-			}
-			list = append(list, map[string]interface{}{"id": rp.ID, "time": rp.Time, "title": rp.Title, "range": rp.Range,
-				"range_label": rp.RangeLabel, "kind": rp.Kind, "model": rp.Model, "summary": rp.Summary, "note": rp.Note})
-		}
-		writeJSON(w, list)
+		writeJSON(w, s.listReportSummaries(0))
 		return nil
 	}
 	switch r.Method {
@@ -806,18 +935,11 @@ func (s *Server) handleReports(w http.ResponseWriter, r *http.Request, arg strin
 		name := "netPing-运维报告-" + rp.ID + ".md"
 		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 		w.Header().Set("Content-Disposition", `attachment; filename="netPing-report-`+rp.ID+`.md"; filename*=UTF-8''`+urlPathEscape(name))
-		generator := "netPing AI（" + rp.Model + "）"
-		if rp.Model == "deterministic" {
-			generator = "netPing 程序统计"
-		}
-		_, _ = w.Write([]byte(rp.Markdown + "\n\n> 由 " + generator + " 生成，生成时间 " + rp.Time + "\n"))
+		_, _ = w.Write([]byte(exportReportMarkdown(rp)))
 		return nil
 	case http.MethodDelete:
-		if !reportIDRe.MatchString(id) {
-			return notFound("报告")
-		}
-		if err := os.Remove(filepath.Join(s.reportDir(), id+".json")); err != nil {
-			return notFound("报告")
+		if err := s.deleteReport(id); err != nil {
+			return err
 		}
 		log.Printf("删除运维报告 %s（来源 %s）", id, clientAddr(r))
 		writeJSON(w, map[string]interface{}{"ok": true})

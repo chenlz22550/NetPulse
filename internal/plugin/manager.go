@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"netping/internal/config"
+	"regexp"
 )
 
 const (
@@ -498,4 +500,331 @@ func lastLine(s string) string {
 		s = s[i+1:]
 	}
 	return clip(strings.TrimSpace(s), 300)
+}
+
+// MCPToolSummary describes a plugin tool without exposing internal command paths.
+type MCPToolSummary struct {
+	Name        string `json:"name"`
+	Title       string `json:"title,omitempty"`
+	FullName    string `json:"full_name"`
+	Description string `json:"description,omitempty"`
+}
+
+// MCPSettingSummary describes a plugin setting with secrets and sensitive URLs masked.
+type MCPSettingSummary struct {
+	Key      string      `json:"key"`
+	Label    string      `json:"label"`
+	Type     string      `json:"type"`
+	Required bool        `json:"required,omitempty"`
+	Set      bool        `json:"set"`
+	Masked   bool        `json:"masked,omitempty"`
+	Value    interface{} `json:"value,omitempty"`
+}
+
+// MCPRunRecord is a structured run summary for MCP clients; free-text message/error/stderr
+// are omitted so arbitrary plugin output or bare tokens cannot leak (inspect details on the web UI).
+type MCPRunRecord struct {
+	Time     time.Time `json:"time"`
+	Plugin   string    `json:"plugin"`
+	Hook     string    `json:"hook"`
+	Tool     string    `json:"tool,omitempty"`
+	Test     bool      `json:"test,omitempty"`
+	OK       bool      `json:"ok"`
+	Ms       int64     `json:"ms"`
+	HasError bool      `json:"has_error"`
+	Summary  string    `json:"summary"`
+}
+
+// MCPPluginInfo is the sanitized plugin view returned to MCP clients (no dir/command or raw secrets).
+type MCPPluginInfo struct {
+	ID          string              `json:"id"`
+	Name        string              `json:"name"`
+	Version     string              `json:"version,omitempty"`
+	Description string              `json:"description,omitempty"`
+	Author      string              `json:"author,omitempty"`
+	Homepage    string              `json:"homepage,omitempty"`
+	TimeoutSec  int                 `json:"timeout_sec,omitempty"`
+	Enabled     bool                `json:"enabled"`
+	Error       string              `json:"error,omitempty"`
+	Hooks       []string            `json:"hooks"`
+	Tools       []MCPToolSummary    `json:"tools"`
+	Settings    []MCPSettingSummary `json:"settings"`
+	LastRun     *MCPRunRecord       `json:"last_run,omitempty"`
+}
+
+// MCPViewPayload is the sanitized read-only plugins + runs payload returned to MCP.
+type MCPViewPayload struct {
+	Plugins   []MCPPluginInfo `json:"plugins"`
+	Runs      []MCPRunRecord  `json:"runs"`
+	RunsTotal int             `json:"runs_total"`
+}
+
+var (
+	mcpURLUserinfoRe = regexp.MustCompile(`(https?://)([^/\s:@]+(?::[^/\s@]*)?)@([^\s"'?#]*)`)
+	mcpURLQueryRe    = regexp.MustCompile(`(https?://[^\s"'?#]+)\?[^\s"']*`)
+	mcpAuthTokenRe   = regexp.MustCompile(`(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+`)
+	mcpKVSecretRe    = regexp.MustCompile(`(?i)\b(token|secret|password|passwd|api[-_]?key|access[-_]?key|auth[-_]?key|signing[-_]?key)\s*[:=]\s*([^\s"',;]+)`)
+)
+
+func isSensitiveSettingKey(key string) bool {
+	lk := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(key)), "-", "_")
+	for _, kw := range []string{"secret", "token", "password", "passwd", "apikey", "api_key", "access_key", "auth_key", "signing_key", "private", "credential", "bearer", "authorization", "webhook"} {
+		if strings.Contains(lk, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+func isSensitiveSettingValue(key, typ string, val interface{}) bool {
+	if typ == SettingSecret || isSensitiveSettingKey(key) {
+		return true
+	}
+	if s, ok := val.(string); ok && strings.Contains(s, "://") {
+		if u, err := url.Parse(strings.TrimSpace(s)); err == nil {
+			if u.User != nil || u.RawQuery != "" {
+				return true
+			}
+		}
+		if strings.Contains(s, "@") || strings.Contains(s, "?") || strings.Contains(strings.ToLower(s), "webhook") {
+			return true
+		}
+	}
+	return false
+}
+
+// MCPView returns a sanitized read-only snapshot of installed plugins and recent structured run summaries.
+func (m *Manager) MCPView(pluginID string, runsLimit int) (MCPViewPayload, bool) {
+	out := MCPViewPayload{
+		Plugins: []MCPPluginInfo{},
+		Runs:    []MCPRunRecord{},
+	}
+	if m == nil {
+		return out, true
+	}
+	if runsLimit <= 0 {
+		runsLimit = 20
+	}
+	if runsLimit > runsKeep {
+		runsLimit = runsKeep
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	secrets := m.collectSensitiveStringsLocked()
+	paths := m.collectPathReplacementsLocked()
+
+	filterID := strings.TrimSpace(pluginID)
+	found := filterID == ""
+
+	last := map[string]*MCPRunRecord{}
+	for i := len(m.runs) - 1; i >= 0; i-- {
+		r := summarizeMCPRun(m.runs[i])
+		if _, ok := last[r.Plugin]; !ok {
+			rc := r
+			last[r.Plugin] = &rc
+		}
+		if filterID != "" && r.Plugin != filterID {
+			continue
+		}
+		out.RunsTotal++
+		if len(out.Runs) < runsLimit {
+			out.Runs = append(out.Runs, r)
+		}
+	}
+
+	ids := make([]string, 0, len(m.plugins))
+	for id := range m.plugins {
+		if filterID != "" && id != filterID {
+			continue
+		}
+		found = true
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	for _, id := range ids {
+		p := m.plugins[id]
+		info := MCPPluginInfo{
+			ID:       p.id,
+			Name:     p.id,
+			Error:    sanitizeMCPText(p.err, secrets, paths),
+			Hooks:    []string{},
+			Tools:    []MCPToolSummary{},
+			Settings: []MCPSettingSummary{},
+			LastRun:  last[p.id],
+		}
+		if st := m.state[p.id]; st != nil {
+			info.Enabled = st.Enabled && p.manifest != nil
+		}
+		if mf := p.manifest; mf != nil {
+			info.Name = sanitizeMCPText(mf.Name, secrets, paths)
+			info.Version = sanitizeMCPText(mf.Version, secrets, paths)
+			info.Description = sanitizeMCPText(mf.Description, secrets, paths)
+			info.Author = sanitizeMCPText(mf.Author, secrets, paths)
+			info.Homepage = sanitizeMCPText(mf.Homepage, secrets, paths)
+			info.TimeoutSec = mf.TimeoutSec
+			if len(mf.Hooks) > 0 {
+				info.Hooks = append([]string(nil), mf.Hooks...)
+			}
+			for _, t := range mf.Tools {
+				info.Tools = append(info.Tools, MCPToolSummary{
+					Name:        sanitizeMCPText(t.Name, secrets, paths),
+					Title:       sanitizeMCPText(t.Title, secrets, paths),
+					FullName:    FullToolName(mf.ID, t.Name),
+					Description: sanitizeMCPText(t.Description, secrets, paths),
+				})
+			}
+			eff := m.effectiveLocked(p)
+			for _, d := range mf.Settings {
+				val := eff[d.Key]
+				isSet := !emptySetting(val)
+				masked := isSensitiveSettingValue(d.Key, d.Type, val)
+				item := MCPSettingSummary{
+					Key:      d.Key,
+					Label:    sanitizeMCPText(d.Label, secrets, paths),
+					Type:     d.Type,
+					Required: d.Required,
+					Set:      isSet,
+					Masked:   masked,
+				}
+				if !masked && isSet {
+					if s, ok := val.(string); ok {
+						item.Value = sanitizeMCPText(s, secrets, paths)
+					} else {
+						item.Value = val
+					}
+				}
+				info.Settings = append(info.Settings, item)
+			}
+		}
+		out.Plugins = append(out.Plugins, info)
+	}
+	return out, found
+}
+
+func (m *Manager) collectSensitiveStringsLocked() []string {
+	seen := map[string]bool{}
+	var out []string
+	addRaw := func(s string) {
+		s = strings.TrimSpace(s)
+		if len(s) < 2 || seen[s] {
+			return
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	add := func(v interface{}) {
+		s, ok := v.(string)
+		if !ok {
+			return
+		}
+		addRaw(s)
+		if strings.Contains(s, "://") {
+			if u, err := url.Parse(strings.TrimSpace(s)); err == nil {
+				if u.User != nil {
+					if pw, ok := u.User.Password(); ok {
+						addRaw(pw)
+					}
+					if un := u.User.Username(); un != "" {
+						addRaw(un)
+					}
+				}
+				for _, vals := range u.Query() {
+					for _, qv := range vals {
+						addRaw(qv)
+					}
+				}
+			}
+		}
+	}
+	for _, p := range m.plugins {
+		if p.manifest == nil {
+			continue
+		}
+		eff := m.effectiveLocked(p)
+		for _, d := range p.manifest.Settings {
+			if isSensitiveSettingValue(d.Key, d.Type, eff[d.Key]) {
+				add(eff[d.Key])
+			}
+		}
+	}
+	for _, st := range m.state {
+		if st == nil {
+			continue
+		}
+		for k, v := range st.Settings {
+			if isSensitiveSettingValue(k, "", v) {
+				add(v)
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return len(out[i]) > len(out[j]) })
+	return out
+}
+
+type pathReplacement struct {
+	from string
+	to   string
+}
+
+func (m *Manager) collectPathReplacementsLocked() []pathReplacement {
+	var out []pathReplacement
+	add := func(p, label string) {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			return
+		}
+		out = append(out, pathReplacement{from: p, to: label})
+		if cleaned := filepath.Clean(p); cleaned != "" && cleaned != p {
+			out = append(out, pathReplacement{from: cleaned, to: label})
+		}
+	}
+	for _, p := range m.plugins {
+		add(p.dir, "[PLUGIN_DIR]")
+		if p.manifest != nil && len(p.manifest.Command) > 0 && (filepath.IsAbs(p.manifest.Command[0]) || strings.ContainsRune(p.manifest.Command[0], filepath.Separator)) {
+			add(p.manifest.Command[0], "[PLUGIN_CMD]")
+		}
+	}
+	add(m.dir, "[PLUGINS_DIR]")
+	add(m.dataDir, "[PLUGIN_DATA_DIR]")
+	add(m.statePath, "[PLUGIN_STATE]")
+	sort.Slice(out, func(i, j int) bool { return len(out[i].from) > len(out[j].from) })
+	return out
+}
+
+func summarizeMCPRun(r RunRecord) MCPRunRecord {
+	summary := "执行成功"
+	if !r.OK {
+		summary = "执行失败（请查看网页插件日志获取详情）"
+	}
+	return MCPRunRecord{
+		Time:     r.Time,
+		Plugin:   r.Plugin,
+		Hook:     r.Hook,
+		Tool:     r.Tool,
+		Test:     r.Test,
+		OK:       r.OK,
+		Ms:       r.Ms,
+		HasError: !r.OK || strings.TrimSpace(r.Error) != "" || strings.TrimSpace(r.Stderr) != "",
+		Summary:  summary,
+	}
+}
+
+func sanitizeMCPText(s string, secrets []string, paths []pathReplacement) string {
+	if s == "" {
+		return ""
+	}
+	for _, sec := range secrets {
+		s = strings.ReplaceAll(s, sec, "[REDACTED]")
+	}
+	for _, pr := range paths {
+		s = strings.ReplaceAll(s, pr.from, pr.to)
+	}
+	s = mcpURLUserinfoRe.ReplaceAllString(s, "${1}[REDACTED]@${3}")
+	s = mcpURLQueryRe.ReplaceAllString(s, "${1}?[REDACTED]")
+	s = mcpAuthTokenRe.ReplaceAllString(s, "${1} [REDACTED]")
+	s = mcpKVSecretRe.ReplaceAllString(s, "${1}=[REDACTED]")
+	return s
 }

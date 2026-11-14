@@ -189,14 +189,17 @@ AI 客户端连接需要访问令牌：在「MCP」页点「生成」并保存�
 
 | 类别 | 工具 |
 |---|---|
-| 查询 | get_overview、list_devices、get_device、get_history、list_alerts、get_topology、get_settings、get_discovery |
+| 查询 | get_overview、list_devices、get_device、get_history、list_alerts、get_topology、get_settings、get_discovery、get_plugins（插件状态、脱敏设置与结构化运行摘要，不返回自由文本 stderr/message）、list_maintenance、list_reports、get_report（json / markdown / html） |
 | 分析 | analyze_impact、get_uplink_path、find_outages、correlate_events、rank_devices、compare_baseline、ping_now |
 | 现场核实 | get_switch_ports、tcp_check、arp_lookup、trace_route、dns_lookup |
 | 端口定位 | get_locate_status、get_switch_mac_table、locate_device、auto_locate（可只预览）、apply_location、test_switch_snmp、set_locate_settings |
 | 扫描 | upsert_scan_job、delete_scan_job、scan_network（可临时扫描指定网段）、set_discovery_settings、add_discovered_devices、apply_ip_suggestion |
 | 自主发现 | get_network_context（网络线索与候选网段）、probe_subnet（只读探测网段，不改拓扑）、fingerprint_host（端口 / 网页 / 横幅 / SNMP 指纹识别设备类型） |
+| 多机房与版本 | list_profiles、create_profile、rename_profile、delete_profile（需 confirm=true）、preview_profile（默认 probe=false 不发包）、activate_profile（需 confirm=true）、get_profile_settings、set_profile_settings（仅机房级设置）、list_profile_versions、create_profile_version、get_profile_version、preview_profile_version_rollback、rollback_profile_version（需 confirm=true） |
+| 维护与报告 | create_maintenance、cancel_maintenance（当前激活机房维护窗口）、generate_health_report（确定性健康报告，无需 AI）、generate_ai_report（显式调用 AI 报告）、delete_report |
+| AI 优化与清理 | generate_ai_optimize（需非只读，调用外部模型生成绑定机房与 epoch 的优化建议）、apply_ai_optimize（默认 dry_run=true，应用需 dry_run=false + confirm=true）、undo_ai_optimize（需 confirm=true）、set_device_locked、preview_device_cleanup（返回绑定 profile_id / epoch）、cleanup_devices（需提供 profile_id / epoch 与 confirm=true） |
 | 设置 | set_alert_config、send_test_alert、set_ping_defaults、set_site、set_schedule、set_monitoring_paused、set_ai_settings（AI 启用、协议格式、深度思考、回答前自检、模型、超时；不能改 API Key / 接口地址 / 代理） |
-| 修改 | reset_layout、upsert_device、delete_device、upsert_switch、delete_switch、upsert_link、delete_link、set_alerting、replace_topology_yaml（默认只校验）、reload_topology_from_disk |
+| 修改 | reset_layout、upsert_device（支持 locked）、delete_device、upsert_switch、delete_switch、upsert_link、delete_link、set_alerting、replace_topology_yaml（默认只校验）、reload_topology_from_disk |
 
 另提供资源（当前拓扑、字段说明、JSON Schema、实时状态）和提示词模板 `generate_topology`（按 MAC/ARP 表生成拓扑）、`health_report`（网络健康报告）、`discover_devices`（自主发现设备）。
 

@@ -427,3 +427,102 @@ func TestNilManager(t *testing.T) {
 		t.Fatal("nil manager called a tool")
 	}
 }
+
+func TestMCPViewSanitization(t *testing.T) {
+	dir := t.TempDir()
+	data := t.TempDir()
+	pDir := filepath.Join(dir, "san-demo")
+	if err := os.MkdirAll(pDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `id: san-demo
+name: "Plugin k9 https://u0:demo-pw-noquery@example.com/a"
+version: 1.0.0
+description: "Uses api-key: inline-kv-secret and https://example.com/q?tok=qval88"
+author: "team mock-sec-val persisted-hyphen-key"
+homepage: "https://u1:demo-home-pw@home.example.com/idx"
+command: ["/bin/sh", "run.sh"]
+hooks: ["notify"]
+tools:
+  - name: check
+    title: "Title mock-sec-val"
+    description: "Endpoint https://u2:demo-tool-pw@api.example.com/v2"
+settings:
+  - key: api_secret
+    label: "Secret k9"
+    type: secret
+  - key: short_pin
+    label: "Pin"
+    type: secret
+  - key: auth_url
+    label: "Auth URL"
+    type: string
+  - key: query_url
+    label: "Query URL"
+    type: string
+`
+	if err := os.WriteFile(filepath.Join(pDir, "plugin.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\n" +
+		"echo 'stderr bare token=bare-tok-99 https://u0:demo-pw-noquery@example.com/p' >&2\n" +
+		"echo '{\"ok\":false,\"message\":\"msg mock-sec-val\",\"error\":\"err bare-tok-99 persisted-hyphen-key\"}'\n" +
+		"exit 1\n"
+	if err := os.WriteFile(filepath.Join(pDir, "run.sh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Persist state with hyphenated "api-key" in plugins.json plus short secret and URLs
+	state := map[string]interface{}{
+		"plugins": map[string]interface{}{
+			"san-demo": map[string]interface{}{
+				"enabled": true,
+				"settings": map[string]interface{}{
+					"api_secret": "mock-sec-val",
+					"api-key":    "persisted-hyphen-key",
+					"short_pin":  "k9",
+					"auth_url":   "https://u0:demo-pw-noquery@example.com/hook",
+					"query_url":  "https://example.com/cb?token=url-tok-77",
+				},
+			},
+		},
+	}
+	rawState, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(data, "plugins.json"), rawState, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	m := plugin.New(dir, data)
+	t.Cleanup(m.Close)
+	_, _ = m.Test("san-demo", "notify", "", nil)
+
+	view, ok := m.MCPView("san-demo", 10)
+	if !ok || len(view.Plugins) != 1 {
+		t.Fatalf("unexpected MCPView: ok=%v view=%+v", ok, view)
+	}
+	if view.Plugins[0].Error != "" {
+		t.Fatalf("unexpected plugin load error: %s", view.Plugins[0].Error)
+	}
+	encoded, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(encoded)
+	for _, needle := range []string{
+		"mock-sec-val", "persisted-hyphen-key", "inline-kv-secret", "demo-pw-noquery", "qval88",
+		"demo-home-pw", "demo-tool-pw", "url-tok-77", "bare-tok-99", "k9", pDir, dir, data,
+		`"stderr"`, `"message"`,
+	} {
+		if strings.Contains(out, needle) {
+			t.Fatalf("MCPView leaked %q in %s", needle, out)
+		}
+	}
+	if !strings.Contains(view.Plugins[0].Description, "[REDACTED]") {
+		t.Fatalf("expected [REDACTED] in description: %s", view.Plugins[0].Description)
+	}
+	if view.Plugins[0].LastRun == nil || !view.Plugins[0].LastRun.HasError || view.Plugins[0].LastRun.OK {
+		t.Fatalf("expected structured failed last_run, got %+v", view.Plugins[0].LastRun)
+	}
+}

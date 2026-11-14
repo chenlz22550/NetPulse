@@ -3,6 +3,7 @@ package server
 import (
 	"log"
 	"net/http"
+	"strings"
 
 	"netping/internal/topology"
 )
@@ -18,9 +19,16 @@ func cleanupReason(n *topology.Node) string {
 	return ""
 }
 
-func (s *Server) handleNodeCleanupPreview(w http.ResponseWriter) {
-	t, _ := s.Topo.Snapshot()
-	items := []map[string]string{}
+type cleanupItem struct {
+	ID     string `json:"id"`
+	IP     string `json:"ip"`
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
+}
+
+func (s *Server) previewNodeCleanup() ([]cleanupItem, int, int64) {
+	t, rev := s.Topo.Snapshot()
+	items := []cleanupItem{}
 	protected := 0
 	for _, n := range t.Nodes {
 		if n.Locked {
@@ -28,25 +36,30 @@ func (s *Server) handleNodeCleanupPreview(w http.ResponseWriter) {
 			continue
 		}
 		if reason := cleanupReason(n); reason != "" {
-			items = append(items, map[string]string{"id": n.ID, "ip": n.IP, "name": n.DisplayName(), "reason": reason})
+			items = append(items, cleanupItem{
+				ID:     n.ID,
+				IP:     n.IP,
+				Name:   n.DisplayName(),
+				Reason: reason,
+			})
 		}
 	}
-	writeJSON(w, map[string]interface{}{"items": items, "protected": protected})
+	return items, protected, rev
 }
 
-func (s *Server) handleNodeCleanup(w http.ResponseWriter, r *http.Request) error {
-	var req struct {
-		IDs []string `json:"ids"`
+func (s *Server) executeNodeCleanup(ids []string, source string) ([]string, int, error) {
+	if len(ids) == 0 {
+		return nil, 0, badRequest("请先预览并选择要清理的设备")
 	}
-	if err := decode(r, &req); err != nil {
-		return err
+	selected := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			selected[id] = true
+		}
 	}
-	if len(req.IDs) == 0 {
-		return badRequest("请先预览并选择要清理的设备")
-	}
-	selected := make(map[string]bool, len(req.IDs))
-	for _, id := range req.IDs {
-		selected[id] = true
+	if len(selected) == 0 {
+		return nil, 0, badRequest("请先预览并选择要清理的设备")
 	}
 	deleted := []string{}
 	err := s.Topo.Update(func(t *topology.Topology) error {
@@ -63,10 +76,48 @@ func (s *Server) handleNodeCleanup(w http.ResponseWriter, r *http.Request) error
 		return nil
 	})
 	if err != nil {
+		return nil, 0, err
+	}
+	skipped := len(selected) - len(deleted)
+	log.Printf("设备清理（来源 %s）：删除 %d 台，跳过 %d 台，节点 %v", source, len(deleted), skipped, deleted)
+	return deleted, skipped, nil
+}
+
+func (s *Server) setNodeLocked(id string, locked bool) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return badRequest("需要提供节点 id")
+	}
+	return s.Topo.Update(func(t *topology.Topology) error {
+		if t.FindSwitch(id) != nil {
+			return badRequest("仅终端节点支持锁定，不能对交换机使用")
+		}
+		n := t.FindNode(id)
+		if n == nil {
+			return notFound("节点 " + id)
+		}
+		n.Locked = locked
+		return nil
+	})
+}
+
+func (s *Server) handleNodeCleanupPreview(w http.ResponseWriter) {
+	items, protected, _ := s.previewNodeCleanup()
+	writeJSON(w, map[string]interface{}{"items": items, "protected": protected})
+}
+
+func (s *Server) handleNodeCleanup(w http.ResponseWriter, r *http.Request) error {
+	var req struct {
+		IDs []string `json:"ids"`
+	}
+	if err := decode(r, &req); err != nil {
 		return err
 	}
-	log.Printf("设备清理（来源 %s）：删除 %d 台，跳过 %d 台，节点 %v", clientAddr(r), len(deleted), len(selected)-len(deleted), deleted)
-	s.okRev(w, map[string]interface{}{"deleted": deleted, "changed": len(deleted), "skipped": len(selected) - len(deleted)})
+	deleted, skipped, err := s.executeNodeCleanup(req.IDs, clientAddr(r))
+	if err != nil {
+		return err
+	}
+	s.okRev(w, map[string]interface{}{"deleted": deleted, "changed": len(deleted), "skipped": skipped})
 	return nil
 }
 
@@ -80,14 +131,7 @@ func (s *Server) handleNodeLock(w http.ResponseWriter, r *http.Request, id strin
 	if req.Locked == nil {
 		return badRequest("需要提供 locked（true/false）")
 	}
-	if err := s.Topo.Update(func(t *topology.Topology) error {
-		n := t.FindNode(id)
-		if n == nil {
-			return notFound("节点 " + id)
-		}
-		n.Locked = *req.Locked
-		return nil
-	}); err != nil {
+	if err := s.setNodeLocked(id, *req.Locked); err != nil {
 		return err
 	}
 	s.okRev(w, map[string]interface{}{"locked": *req.Locked})

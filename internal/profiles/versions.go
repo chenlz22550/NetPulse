@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -78,6 +79,12 @@ func (m *Manager) saveVersionIndex(profileID string, list []VersionMeta) error {
 
 // ListVersions returns all saved versions for profileID, newest first.
 func (m *Manager) ListVersions(profileID string) ([]VersionMeta, error) {
+	m.verMu.Lock()
+	defer m.verMu.Unlock()
+	return m.listVersionsLocked(profileID)
+}
+
+func (m *Manager) listVersionsLocked(profileID string) ([]VersionMeta, error) {
 	m.mu.RLock()
 	exists := m.findIdxLocked(profileID) >= 0
 	m.mu.RUnlock()
@@ -100,6 +107,15 @@ func (m *Manager) ListVersions(profileID string) ([]VersionMeta, error) {
 // CreateVersion captures a snapshot of both topology and per-room settings for profileID,
 // enforcing per-room count and total byte retention limits.
 func (m *Manager) CreateVersion(profileID, reason, note string) (VersionMeta, error) {
+	if m.topo != nil {
+		defer m.topo.ProfileWork()()
+	}
+	m.verMu.Lock()
+	defer m.verMu.Unlock()
+	return m.createVersionLocked(profileID, reason, note)
+}
+
+func (m *Manager) createVersionLocked(profileID, reason, note string) (VersionMeta, error) {
 	m.mu.RLock()
 	exists := m.findIdxLocked(profileID) >= 0
 	m.mu.RUnlock()
@@ -220,6 +236,12 @@ func pruneVersions(list []VersionMeta, maxCount int, maxBytes int64) (kept []Ver
 
 // GetVersion loads the full snapshot for verID. Callers returning HTTP JSON must mask Settings.
 func (m *Manager) GetVersion(profileID, verID string) (*VersionSnapshot, error) {
+	m.verMu.Lock()
+	defer m.verMu.Unlock()
+	return m.getVersionLocked(profileID, verID)
+}
+
+func (m *Manager) getVersionLocked(profileID, verID string) (*VersionSnapshot, error) {
 	m.mu.RLock()
 	exists := m.findIdxLocked(profileID) >= 0
 	m.mu.RUnlock()
@@ -257,11 +279,6 @@ func (m *Manager) GetVersion(profileID, verID string) (*VersionSnapshot, error) 
 // RollbackVersion restores both topology and per-room settings of profileID to verID,
 // saving an automatic pre_rollback snapshot beforehand.
 func (m *Manager) RollbackVersion(profileID, verID string) (VersionMeta, VersionMeta, error) {
-	snap, err := m.GetVersion(profileID, verID)
-	if err != nil {
-		return VersionMeta{}, VersionMeta{}, err
-	}
-
 	m.switchMu.Lock()
 	defer m.switchMu.Unlock()
 
@@ -277,7 +294,14 @@ func (m *Manager) RollbackVersion(profileID, verID string) (VersionMeta, Version
 		}
 	}
 
-	backup, err := m.CreateVersion(profileID, "pre_rollback", "回滚至 "+verID+" 前自动备份")
+	m.verMu.Lock()
+	snap, err := m.getVersionLocked(profileID, verID)
+	if err != nil {
+		m.verMu.Unlock()
+		return VersionMeta{}, VersionMeta{}, err
+	}
+	backup, err := m.createVersionLocked(profileID, "pre_rollback", "回滚至 "+verID+" 前自动备份")
+	m.verMu.Unlock()
 	if err != nil {
 		return VersionMeta{}, VersionMeta{}, fmt.Errorf("创建回滚前备份失败: %w", err)
 	}
@@ -317,9 +341,170 @@ func (m *Manager) RollbackVersion(profileID, verID string) (VersionMeta, Version
 		if m.mon != nil {
 			m.mon.Sync(monitor.BuildTargets(snap.Topology, snap.Settings.Ping))
 		}
+		// An active rollback changes the context used by in-flight AI work and
+		// previously previewed operations, just like a profile activation.
+		m.epoch.Add(1)
 		m.topo.NotifyCurrent()
 	}
 
 	m.touchProfile(profileID)
 	return snap.Meta, backup, nil
+}
+
+// RollbackPreview summarizes what rolling back profileID to verID would change without mutating state.
+type RollbackPreview struct {
+	ProfileID   string              `json:"profile_id"`
+	Active      bool                `json:"active"`
+	Target      VersionMeta         `json:"target"`
+	Current     RollbackRoomSummary `json:"current"`
+	Diff        RollbackDiff        `json:"diff"`
+	CanRollback bool                `json:"can_rollback"`
+	BusyReason  string              `json:"busy_reason,omitempty"`
+}
+
+// RollbackRoomSummary describes the current state of a room before rollback.
+type RollbackRoomSummary struct {
+	Switches int    `json:"switches"`
+	Nodes    int    `json:"nodes"`
+	SiteName string `json:"site_name"`
+}
+
+// RollbackDiff describes high-level topology and settings changes for a version rollback (without exposing secrets).
+type RollbackDiff struct {
+	SiteChanged             bool     `json:"site_changed"`
+	SwitchesAdded           []string `json:"switches_added,omitempty"`
+	SwitchesRemoved         []string `json:"switches_removed,omitempty"`
+	SwitchesModified        []string `json:"switches_modified,omitempty"`
+	NodesAdded              []string `json:"nodes_added,omitempty"`
+	NodesRemoved            []string `json:"nodes_removed,omitempty"`
+	NodesModified           []string `json:"nodes_modified,omitempty"`
+	SettingsSectionsChanged []string `json:"settings_sections_changed,omitempty"`
+}
+
+// PreviewRollback compares verID against the current room topology and settings without modifying anything.
+func (m *Manager) PreviewRollback(profileID, verID string) (*RollbackPreview, error) {
+	snap, err := m.GetVersion(profileID, verID)
+	if err != nil {
+		return nil, err
+	}
+	curTopo, err := m.loadRoomTopology(profileID)
+	if err != nil {
+		return nil, err
+	}
+	curSettings, err := m.loadRoomSettings(profileID)
+	if err != nil {
+		return nil, err
+	}
+	curTopo.Normalize()
+	curSettings.Normalize()
+
+	active := profileID == m.ActiveID()
+	canRollback := true
+	busyReason := ""
+	if m.switching.Load() {
+		canRollback = false
+		busyReason = ErrBusy.Error()
+	} else if active {
+		if (m.disc != nil && m.disc.Running()) || (m.loc != nil && m.loc.Running()) {
+			canRollback = false
+			busyReason = ErrBusy.Error()
+		} else if unlockTopo, ok := m.topo.TryLockProfile(); !ok {
+			canRollback = false
+			busyReason = ErrBusy.Error()
+		} else {
+			unlockTopo()
+		}
+	}
+
+	diff := RollbackDiff{
+		SiteChanged: !reflect.DeepEqual(curTopo.Site, snap.Topology.Site),
+	}
+
+	curSW := make(map[string]*topology.Switch, len(curTopo.Switches))
+	for _, s := range curTopo.Switches {
+		if s != nil {
+			curSW[s.ID] = s
+		}
+	}
+	tgtSW := make(map[string]*topology.Switch, len(snap.Topology.Switches))
+	for _, s := range snap.Topology.Switches {
+		if s != nil {
+			tgtSW[s.ID] = s
+		}
+	}
+	for id, ts := range tgtSW {
+		cs, ok := curSW[id]
+		if !ok {
+			diff.SwitchesAdded = append(diff.SwitchesAdded, id)
+		} else if !reflect.DeepEqual(cs, ts) {
+			diff.SwitchesModified = append(diff.SwitchesModified, id)
+		}
+	}
+	for id := range curSW {
+		if _, ok := tgtSW[id]; !ok {
+			diff.SwitchesRemoved = append(diff.SwitchesRemoved, id)
+		}
+	}
+	sort.Strings(diff.SwitchesAdded)
+	sort.Strings(diff.SwitchesRemoved)
+	sort.Strings(diff.SwitchesModified)
+
+	curNodes := make(map[string]*topology.Node, len(curTopo.Nodes))
+	for _, n := range curTopo.Nodes {
+		if n != nil {
+			curNodes[n.ID] = n
+		}
+	}
+	tgtNodes := make(map[string]*topology.Node, len(snap.Topology.Nodes))
+	for _, n := range snap.Topology.Nodes {
+		if n != nil {
+			tgtNodes[n.ID] = n
+		}
+	}
+	for id, tn := range tgtNodes {
+		cn, ok := curNodes[id]
+		if !ok {
+			diff.NodesAdded = append(diff.NodesAdded, id)
+		} else if !reflect.DeepEqual(cn, tn) {
+			diff.NodesModified = append(diff.NodesModified, id)
+		}
+	}
+	for id := range curNodes {
+		if _, ok := tgtNodes[id]; !ok {
+			diff.NodesRemoved = append(diff.NodesRemoved, id)
+		}
+	}
+	sort.Strings(diff.NodesAdded)
+	sort.Strings(diff.NodesRemoved)
+	sort.Strings(diff.NodesModified)
+
+	if !reflect.DeepEqual(curSettings.Schedule, snap.Settings.Schedule) {
+		diff.SettingsSectionsChanged = append(diff.SettingsSectionsChanged, "schedule")
+	}
+	if !reflect.DeepEqual(curSettings.Discovery, snap.Settings.Discovery) {
+		diff.SettingsSectionsChanged = append(diff.SettingsSectionsChanged, "discovery")
+	}
+	if !reflect.DeepEqual(curSettings.Locate, snap.Settings.Locate) {
+		diff.SettingsSectionsChanged = append(diff.SettingsSectionsChanged, "locate")
+	}
+	if !reflect.DeepEqual(curSettings.Ping, snap.Settings.Ping) {
+		diff.SettingsSectionsChanged = append(diff.SettingsSectionsChanged, "ping")
+	}
+	if !reflect.DeepEqual(curSettings.Alert, snap.Settings.Alert) {
+		diff.SettingsSectionsChanged = append(diff.SettingsSectionsChanged, "alert")
+	}
+
+	return &RollbackPreview{
+		ProfileID: profileID,
+		Active:    active,
+		Target:    snap.Meta,
+		Current: RollbackRoomSummary{
+			Switches: len(curTopo.Switches),
+			Nodes:    len(curTopo.Nodes),
+			SiteName: curTopo.Site.Name,
+		},
+		Diff:        diff,
+		CanRollback: canRollback,
+		BusyReason:  busyReason,
+	}, nil
 }

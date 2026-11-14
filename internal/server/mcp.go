@@ -36,9 +36,12 @@ const mcpInstructions = `netPing 是机房网络 Ping 监控工具。通过本�
 1. 查询：get_overview（总体状态与异常设备）、list_devices（设备列表与实时延迟/丢包）、get_device、get_history（历史曲线统计）、list_alerts、get_topology、get_settings。
    分析（只读）：analyze_impact（异常设备按交换机/端口归类，找公共故障点）、get_uplink_path（设备到核心的逐跳路径）、find_outages（历史中断/丢包时段与可用率）、correlate_events（多设备同时异常）、rank_devices（历史稳定性排行）、compare_baseline（与昨天/上周同时段对比）、ping_now（立即 ping 测试）。
    现场核实（只读，从 netPing 主机实时探测）：get_switch_ports（SNMP 读交换机端口状态、速率、双工、错误计数增长、交换机运行时长）、tcp_check（TCP 端口探测，区分离线与禁 ping）、scan_ports（扫描最多 1024 个 TCP 端口）、get_tcp_monitoring（持续 TCPing 状态）、get_history 的 port 参数（端口历史）、arp_lookup（ARP 核对，发现 IP 冲突）、trace_route（逐跳路由追踪）、dns_lookup（DNS 解析）。
+   只读查看：get_plugins（插件能力、脱敏设置与结构化运行状态摘要，不返回本地路径或自由文本 stderr/message）、list_maintenance（维护窗口）、list_reports / get_report（运维报告 json/markdown/html）。
+   多机房与版本（只读）：list_profiles、preview_profile（默认 probe=false 不发包）、get_profile_settings、list_profile_versions、get_profile_version、preview_profile_version_rollback、preview_device_cleanup（返回绑定 cleanup_devices 的 profile_id、epoch、rev）。
 2. 端口定位：get_locate_status、get_switch_mac_table（交换机每个口学到的 MAC）、locate_device（设备实际插在哪个口）、auto_locate（未定位设备自动挂到端口）、apply_location、test_switch_snmp、set_locate_settings。
 网段扫描（自动扫描模式）：get_discovery 查看扫描任务与结果；upsert_scan_job 新建/修改扫描任务（一个或多个网段，按间隔自动扫描、自动添加新设备）、delete_scan_job、scan_network 立即扫描（可传 subnets 临时扫描）、set_discovery_settings、add_discovered_devices、apply_ip_suggestion。
-3. 管理（非只读模式）：upsert_device / delete_device（终端节点）、upsert_switch / delete_switch、upsert_link / delete_link、reset_layout、set_alerting（开关设备告警）、set_alert_config / send_test_alert（通知渠道）、set_tcp_monitoring（配置设备的持续 TCPing 端口）、set_ping_defaults、set_site、set_schedule（全局监控时段）、set_monitoring_paused、replace_topology_yaml（整体替换，先 dry_run 校验）、set_ai_settings（AI 诊断开关、协议格式、深度思考、回答前自检、模型名、超时）。
+3. 管理（非只读模式）：upsert_device（含 locked 字段）/ delete_device（终端节点）、set_device_locked、cleanup_devices（按预览返回的 profile_id、epoch、ids 清理且需 confirm=true）、upsert_switch / delete_switch、upsert_link / delete_link、reset_layout、set_alerting（开关设备告警）、set_alert_config / send_test_alert（通知渠道）、create_maintenance / cancel_maintenance（当前机房告警维护窗口）、set_tcp_monitoring（配置设备的持续 TCPing 端口）、set_ping_defaults、set_site、set_schedule（全局监控时段）、set_monitoring_paused、replace_topology_yaml（整体替换，先 dry_run 校验）、set_ai_settings（AI 诊断开关、协议格式、深度思考、回答前自检、模型名、超时）。
+   多机房与报告管理（非只读模式）：create_profile、rename_profile、set_profile_settings（仅限机房级设置）、delete_profile（需 confirm=true）、activate_profile（需 confirm=true）、create_profile_version、rollback_profile_version（需 confirm=true）；generate_health_report（程序确定性健康报告）、generate_ai_report（显式调用 AI 报告）、delete_report；generate_ai_optimize（会向外部模型发送设备摘要并产生费用，需非只读模式）、apply_ai_optimize（默认 dry_run=true，应用需 dry_run=false + confirm=true + profile_id + epoch）、undo_ai_optimize（需 confirm=true）。
 不能通过 MCP 修改：监听地址、网页登录账号、MCP 自身设置、AI 的 API Key / 接口地址 / 代理（需在网页或 config.yaml 中修改）。
 约定：设备用 id 或 ip 指定；修改会立即写回 topology.yaml 并生效；设备默认只监控不告警；时间均为服务器本地时间。
 字段说明见资源 netping://docs/topology-fields.md。批量迁移机房时优先使用 replace_topology_yaml 并先 dry_run=true。删除或整体替换前请先向用户确认。`
@@ -211,7 +214,7 @@ func (s *Server) mcpDispatch(m rpcMsg, remote string) (interface{}, *rpcError) {
 				"resources": map[string]interface{}{"listChanged": false, "subscribe": false},
 				"prompts":   map[string]interface{}{"listChanged": false},
 			},
-			"serverInfo":   map[string]interface{}{"name": "netPing", "title": "netPing 机房网络监控", "version": Version},
+			"serverInfo":   map[string]interface{}{"name": "netPing", "title": "网脉 NetPulse 网络监控", "version": Version},
 			"instructions": mcpInstructions,
 		}, nil
 	case "ping":
@@ -699,6 +702,7 @@ func init() {
 				"flags":    map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string", "enum": topology.KnownFlags}, "description": "标记（整体替换）"},
 				"tags":     strArr("自定义标签（整体替换）"),
 				"note":     str("备注"),
+				"locked":   boolean("是否锁定设备（锁定后不会被设备清理误删）"),
 				"monitor":  monitorSchema,
 				"position": positionSchema,
 			}),
@@ -1034,6 +1038,7 @@ func init() {
 	mcpTools = append(mcpTools, probeTools()...)
 	mcpTools = append(mcpTools, tcpMonitoringTools()...)
 	mcpTools = append(mcpTools, discoverTools()...)
+	mcpTools = append(mcpTools, operationsTools()...)
 }
 
 // ---------------------------------------------------------------------------

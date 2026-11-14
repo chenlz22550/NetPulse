@@ -85,6 +85,7 @@ type Options struct {
 type Manager struct {
 	mu        sync.RWMutex
 	switchMu  sync.Mutex
+	verMu     sync.Mutex
 	switching atomic.Bool
 	epoch     atomic.Int64
 
@@ -672,7 +673,9 @@ func (m *Manager) Delete(id string) error {
 		return err
 	}
 	m.mu.Unlock()
+	m.verMu.Lock()
 	_ = os.RemoveAll(m.RoomDir(id))
+	m.verMu.Unlock()
 	return nil
 }
 

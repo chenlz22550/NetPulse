@@ -1,9 +1,11 @@
 package profiles
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -403,5 +405,74 @@ func TestConfigVersionsAndRollback(t *testing.T) {
 	}
 	if len(list) != maxVersionsPerRoom {
 		t.Fatalf("expected %d versions after pruning, got %d", maxVersionsPerRoom, len(list))
+	}
+}
+
+func TestCreateVersionConcurrency(t *testing.T) {
+	baseDir := t.TempDir()
+	_, _, mon, _, _, _, _, mgr := setupTestEnv(t, baseDir, false)
+	defer func() {
+		mgr.Shutdown()
+		mon.Close()
+	}()
+
+	const workers = 16
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	ids := make(chan string, workers)
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			meta, err := mgr.CreateVersion(DefaultProfileID, "manual", fmt.Sprintf("concurrent-%d", idx))
+			if err != nil {
+				errs <- err
+				return
+			}
+			ids <- meta.ID
+			if _, err := mgr.ListVersions(DefaultProfileID); err != nil {
+				errs <- err
+				return
+			}
+			if _, err := mgr.PreviewRollback(DefaultProfileID, meta.ID); err != nil {
+				errs <- err
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	close(ids)
+
+	for err := range errs {
+		t.Fatalf("concurrent version op error: %v", err)
+	}
+
+	seen := map[string]bool{}
+	for id := range ids {
+		if seen[id] {
+			t.Fatalf("duplicate version ID generated: %s", id)
+		}
+		seen[id] = true
+	}
+	if len(seen) != workers {
+		t.Fatalf("expected %d unique version IDs, got %d", workers, len(seen))
+	}
+
+	list, err := mgr.ListVersions(DefaultProfileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != workers {
+		t.Fatalf("expected %d versions in index, got %d", workers, len(list))
+	}
+	for _, meta := range list {
+		snap, err := mgr.GetVersion(DefaultProfileID, meta.ID)
+		if err != nil {
+			t.Fatalf("snapshot %s unreadable: %v", meta.ID, err)
+		}
+		if snap.Topology == nil {
+			t.Fatalf("snapshot %s missing topology", meta.ID)
+		}
 	}
 }
