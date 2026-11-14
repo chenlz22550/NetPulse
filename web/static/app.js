@@ -255,6 +255,7 @@
     const [name, arg] = h.split('/');
     $$('nav.tabs a').forEach(a => a.classList.toggle('active', a.dataset.tab === (name === 'node' ? 'list' : name)));
     const app = $('#app');
+    if (closeTerminal) closeTerminal();
     if (page && page.destroy) page.destroy();
     view = null;
     page = null;
@@ -796,6 +797,7 @@
       status: id => S.status[id],
       vendorColor,
       attachLabel,
+      onSSH: id => openTerminal(id, 'ssh', '', true),
       onSelect: sel => { S.sel = sel; view.setSelection(sel); renderDetail(); },
       onOpen: sel => { if (sel.kind === 'node' || sel.kind === 'switch') location.hash = '#/node/' + encodeURIComponent(sel.id); },
       onMove: async patch => {
@@ -2807,9 +2809,153 @@
 
   // ---------------------------------------------------------------------------
   // 端口定位页：SNMP 读取交换机 MAC 地址表，自动确定设备接在哪个端口
+  let closeTerminal = null;
+  function openTerminal(id, protocol = 'telnet', readHost = '', node = false) {
+    if (closeTerminal) closeTerminal();
+    const isSSH = protocol === 'ssh', title = isSSH ? 'SSH' : 'Telnet';
+    const sw = (node ? S.topo.nodes : S.topo.switches).find(s => s.id === id);
+    if (!sw) return;
+    readHost = String(readHost || sw.ip || '').trim();
+    const host = readHost.replace(/^(\[[^\]]+\]|[^:]+):[^:]*$/, '$1');
+    if (!host) { toast('请先保存该设备的读取地址或管理 IP', true); return; }
+    const dialog = document.createElement('dialog');
+    dialog.className = 'telnet-dialog' + (isSSH ? ' ssh-dialog' : '');
+    dialog.innerHTML = `<div class="ph"><b>${esc(sw.name || id)} · ${title}</b><button class="btn small" data-close>关闭</button></div>
+      <div class="pb"><form class="telnet-toolbar"><span class="mono telnet-host">${esc(host)}</span>
+        <label>端口 <input name="port" type="number" min="1" max="65535" value="${isSSH ? 22 : 23}" required aria-label="${title} 端口"></label>
+        ${isSSH ? `<label>用户名 <input name="username" class="ssh-username" required maxlength="256" autocomplete="off"></label>
+        <label>密码 <input name="password" class="ssh-password" type="password" autocomplete="new-password" maxlength="4096"></label>` : ''}
+        <button class="btn primary" type="submit">连接</button><button class="btn" type="button" data-disconnect disabled>断开</button>
+        <span role="status" data-state>未连接</span></form>
+        <div class="help">由 netPing 服务器连接设备；${isSSH ? '先填写用户名和密码，首次连接需核对主机指纹。' : '请在终端输入账号和密码。Telnet 使用明文传输。'}账号密码不保存在 netPing。配置修改会直接作用于设备，按设备要求保存配置。</div>
+        ${isSSH ? `<div class="ssh-hostkey hidden" data-hostkey><b>首次连接：请核对设备主机指纹</b><div class="mono" data-fingerprint></div>
+        <button type="button" class="btn primary" data-trust>信任此主机并继续</button> <button type="button" class="btn" data-reject>取消连接</button></div>` : ''}
+        <div class="telnet-screen" aria-label="设备交互终端"></div>
+        <div class="btns"><button class="btn small" data-key="enter">回车</button><button class="btn small" data-key="space">空格 / 翻页</button><button class="btn small" data-key="interrupt">Ctrl+C</button><button class="btn small" data-key="exit">Ctrl+Z</button><span class="muted">支持方向键、Tab 补全；关闭窗口会断开连接。</span></div>
+        ${isSSH ? `<form class="ssh-upload"><b>SFTP 文件上传</b><div class="help">设备需启用 SFTP。单个文件最大 1 GiB，默认保留远端同名文件。上传只传送文件，不会自动安装或执行。</div>
+          <div class="ssh-upload-fields"><label class="f"><span>选择文件</span><input type="file" name="file" required></label>
+          <label class="f"><span>远程目录</span><input type="text" name="directory" value="." required placeholder="如 /tmp 或 flash:/"></label></div>
+          <div class="btns"><label><input type="checkbox" name="overwrite"> 覆盖远端同名文件</label><button class="btn primary" type="submit" disabled>上传文件</button><button class="btn" type="button" data-cancel-upload disabled>取消上传</button></div>
+          <progress max="100" value="0" aria-label="上传进度"></progress><div role="status" class="help" data-upload-state>请先连接 SSH。</div>
+        </form>` : ''}
+      </div>`;
+    document.body.appendChild(dialog);
+    dialog.showModal();
+    const term = new Terminal({ cursorBlink: true, fontSize: 14, fontFamily: 'Menlo, Consolas, monospace', scrollback: 3000, allowProposedApi: false });
+    const fit = new FitAddon.FitAddon();
+    term.loadAddon(fit);
+    term.open(dialog.querySelector('.telnet-screen'));
+    let socket = null, disposed = false, sessionID = '', transfer = null, connected = false;
+    const form = dialog.querySelector('form'), port = form.elements.port;
+    const state = dialog.querySelector('[data-state]'), disconnect = dialog.querySelector('[data-disconnect]');
+    const connect = form.querySelector('[type=submit]');
+    const uploadForm = dialog.querySelector('.ssh-upload');
+    const uploadState = dialog.querySelector('[data-upload-state]');
+    const refreshUpload = () => {
+      if (!uploadForm) return;
+      uploadForm.querySelector('[type=submit]').disabled = !sessionID || !!transfer;
+      uploadForm.querySelector('[data-cancel-upload]').disabled = !transfer;
+      ['file', 'directory', 'overwrite'].forEach(name => { uploadForm.elements[name].disabled = !!transfer; });
+    };
+    const setState = (text, active) => {
+      state.textContent = text; disconnect.disabled = !active; port.disabled = active; connect.disabled = active;
+      if (isSSH) { form.elements.username.disabled = active; form.elements.password.disabled = active; }
+    };
+    const send = msg => { if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(msg)); };
+    term.onData(data => { if (connected) send({ type: 'input', data }); });
+    term.onResize(({ cols, rows }) => { if (connected) send({ type: 'resize', cols, rows }); });
+    const resize = new ResizeObserver(() => { if (!disposed) fit.fit(); });
+    resize.observe(dialog.querySelector('.telnet-screen'));
+    const stop = () => {
+      const ws = socket; socket = null;
+      connected = false; sessionID = '';
+      if (transfer) transfer.abort();
+      if (isSSH) { form.elements.password.value = ''; dialog.querySelector('[data-hostkey]').classList.add('hidden'); }
+      refreshUpload();
+      if (ws) { ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null; ws.close(); }
+      setState('已断开', false);
+    };
+    closeTerminal = () => {
+      if (disposed) return;
+      disposed = true; stop(); resize.disconnect(); term.dispose(); dialog.close(); dialog.remove(); closeTerminal = null;
+    };
+    dialog.querySelector('[data-close]').onclick = () => closeTerminal();
+    dialog.addEventListener('cancel', ev => { ev.preventDefault(); closeTerminal(); });
+    disconnect.onclick = () => { stop(); term.writeln('\r\n[已断开连接]'); };
+    const keys = { enter: '\r', space: ' ', interrupt: '\x03', exit: '\x1a' };
+    dialog.querySelectorAll('[data-key]').forEach(b => { b.onclick = () => { if (connected) send({ type: 'input', data: keys[b.dataset.key] }); term.focus(); }; });
+    if (isSSH) {
+      dialog.querySelector('[data-reject]').onclick = stop;
+      uploadForm.querySelector('[data-cancel-upload]').onclick = () => { if (transfer) transfer.abort(); };
+      uploadForm.onsubmit = ev => {
+        ev.preventDefault();
+        const file = uploadForm.elements.file.files[0];
+        if (!file || !sessionID || transfer) return;
+        if (file.size > 1024 ** 3) { uploadState.textContent = '文件超过 1 GiB，请选择较小的文件。'; return; }
+        const url = new URL(`api/locate/ssh-upload/${sessionID}`, document.baseURI);
+        url.searchParams.set('name', file.name); url.searchParams.set('dir', uploadForm.elements.directory.value.trim());
+        url.searchParams.set('overwrite', uploadForm.elements.overwrite.checked ? '1' : '0');
+        const xhr = new XMLHttpRequest(); transfer = xhr;
+        const progress = uploadForm.querySelector('progress'); progress.value = 0;
+        uploadState.textContent = '正在上传…'; refreshUpload();
+        xhr.open('POST', url); xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+        xhr.upload.onprogress = ev => { if (ev.lengthComputable) { progress.value = ev.loaded / ev.total * 100; uploadState.textContent = progress.value >= 100 ? '文件已发送，等待设备确认…' : `正在上传 ${Math.floor(progress.value)}%`; } };
+        xhr.onload = () => {
+          let result = {}; try { result = JSON.parse(xhr.responseText); } catch (_) { /* HTTP error without JSON */ }
+          if (xhr.status >= 200 && xhr.status < 300 && result.ok) { progress.value = 100; uploadState.textContent = `上传完成：${result.path}（${result.bytes} 字节）`; }
+          else uploadState.textContent = result.error || '上传失败，请检查连接、目录及 SFTP 服务后重试。';
+        };
+        xhr.onerror = () => { uploadState.textContent = '上传连接中断，请检查网络及远端文件后重试。'; };
+        xhr.onabort = () => { uploadState.textContent = '已取消上传；远端可能保留部分文件，请检查后重试。'; };
+        xhr.onloadend = () => { transfer = null; refreshUpload(); };
+        xhr.send(file);
+      };
+    }
+    form.onsubmit = ev => {
+      ev.preventDefault();
+      const username = isSSH ? form.elements.username.value.trim() : '';
+      let password = isSSH ? form.elements.password.value : '';
+      stop(); term.reset(); fit.fit();
+      const url = new URL(`${node ? 'api/ssh/nodes' : 'api/locate/' + protocol}/${encodeURIComponent(id)}`, document.baseURI);
+      url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      url.searchParams.set('port', port.value);
+      const ws = new WebSocket(url); socket = ws; ws.binaryType = 'arraybuffer';
+      setState('连接中…', true);
+      const endpoint = `${host.includes(':') && !host.startsWith('[') ? `[${host}]` : host}:${port.value}`;
+      term.writeln(`[正在连接 ${endpoint}…]`);
+      ws.onopen = () => {
+        if (isSSH) { send({ type: 'auth', username, password, cols: term.cols, rows: term.rows }); password = ''; }
+        else send({ type: 'resize', cols: term.cols, rows: term.rows });
+      };
+      ws.onmessage = ev => {
+        if (ev.data instanceof ArrayBuffer) term.write(new Uint8Array(ev.data));
+        else {
+          const msg = JSON.parse(ev.data);
+          if (msg.message) term.writeln(`\r\n[${msg.message}]`);
+          if (msg.type === 'hostkey') {
+            const box = dialog.querySelector('[data-hostkey]'); box.classList.remove('hidden');
+            box.querySelector('[data-fingerprint]').textContent = `${msg.address}\n${msg.fingerprint}`;
+            box.querySelector('[data-trust]').onclick = () => { send({ type: 'trust', fingerprint: msg.fingerprint }); box.classList.add('hidden'); };
+            state.textContent = '等待核对主机指纹';
+          }
+          if (msg.type === 'connected') {
+            connected = true; sessionID = msg.session || ''; setState(msg.message, true); refreshUpload();
+            if (isSSH) uploadState.textContent = '已连接，可选择文件并上传。';
+            send({ type: 'resize', cols: term.cols, rows: term.rows }); term.focus();
+          }
+        }
+      };
+      ws.onerror = () => { term.writeln(`\r\n[连接失败：请检查网页登录状态、已保存的地址、${title} 端口及服务器到设备的网络，然后点击连接重试。]`); };
+      ws.onclose = () => { password = ''; stop(); term.writeln('\r\n[连接已关闭]'); };
+    };
+    fit.fit();
+    if (isSSH) form.elements.username.focus(); else form.requestSubmit();
+  }
+
+
   function locatePage(app) {
     let data = null, cfg = null, tableSw = '', busy = false;
-    let closeTerminal = null, alive = true;
+    let alive = true;
     app.innerHTML = `<div class="page pad"><div class="settings">
       <div>
         <div class="panel"><div class="ph">端口定位<span class="r" id="lState"></span></div><div class="pb">
@@ -2985,147 +3131,6 @@ snmp-agent community read 团体名</pre></div></div>
       } catch (e) { $('#lTbl').innerHTML = `<div class="pb v-down">${esc(errMsg(e))}</div>`; }
     }
 
-    function openTerminal(id, protocol = 'telnet') {
-      if (closeTerminal) closeTerminal();
-      const isSSH = protocol === 'ssh', title = isSSH ? 'SSH' : 'Telnet';
-      const sw = S.topo.switches.find(s => s.id === id);
-      // 读取地址可带 SNMP 端口；终端使用表单中独立设置的 TCP 端口。
-      const readHost = String(((cfg.locate.switches || {})[id] || {}).host || sw.ip || '').trim();
-      const host = readHost.replace(/^(\[[^\]]+\]|[^:]+):[^:]*$/, '$1');
-      if (!host) { toast('请先保存该交换机的读取地址或管理 IP', true); return; }
-      const dialog = document.createElement('dialog');
-      dialog.className = 'telnet-dialog' + (isSSH ? ' ssh-dialog' : '');
-      dialog.innerHTML = `<div class="ph"><b>${esc(sw.name || id)} · ${title}</b><button class="btn small" data-close>关闭</button></div>
-        <div class="pb"><form class="telnet-toolbar"><span class="mono telnet-host">${esc(host)}</span>
-          <label>端口 <input name="port" type="number" min="1" max="65535" value="${isSSH ? 22 : 23}" required aria-label="${title} 端口"></label>
-          ${isSSH ? `<label>用户名 <input name="username" class="ssh-username" required maxlength="256" autocomplete="off"></label>
-          <label>密码 <input name="password" class="ssh-password" type="password" autocomplete="new-password" maxlength="4096"></label>` : ''}
-          <button class="btn primary" type="submit">连接</button><button class="btn" type="button" data-disconnect disabled>断开</button>
-          <span role="status" data-state>未连接</span></form>
-          <div class="help">由 netPing 服务器连接交换机；${isSSH ? '先填写用户名和密码，首次连接需核对主机指纹。' : '请在终端输入账号和密码。Telnet 使用明文传输。'}账号密码不保存在 netPing。配置修改会直接作用于交换机，按设备要求保存配置。</div>
-          ${isSSH ? `<div class="ssh-hostkey hidden" data-hostkey><b>首次连接：请核对设备主机指纹</b><div class="mono" data-fingerprint></div>
-          <button type="button" class="btn primary" data-trust>信任此主机并继续</button> <button type="button" class="btn" data-reject>取消连接</button></div>` : ''}
-          <div class="telnet-screen" aria-label="交换机交互终端"></div>
-          <div class="btns"><button class="btn small" data-key="enter">回车</button><button class="btn small" data-key="space">空格 / 翻页</button><button class="btn small" data-key="interrupt">Ctrl+C</button><button class="btn small" data-key="exit">Ctrl+Z</button><span class="muted">支持方向键、Tab 补全；关闭窗口会断开连接。</span></div>
-          ${isSSH ? `<form class="ssh-upload"><b>SFTP 文件上传</b><div class="help">设备需启用 SFTP。单个文件最大 1 GiB，默认保留远端同名文件。上传只传送文件，不会自动安装或执行。</div>
-            <div class="ssh-upload-fields"><label class="f"><span>选择文件</span><input type="file" name="file" required></label>
-            <label class="f"><span>远程目录</span><input type="text" name="directory" value="." required placeholder="如 /tmp 或 flash:/"></label></div>
-            <div class="btns"><label><input type="checkbox" name="overwrite"> 覆盖远端同名文件</label><button class="btn primary" type="submit" disabled>上传文件</button><button class="btn" type="button" data-cancel-upload disabled>取消上传</button></div>
-            <progress max="100" value="0" aria-label="上传进度"></progress><div role="status" class="help" data-upload-state>请先连接 SSH。</div>
-          </form>` : ''}
-        </div>`;
-      document.body.appendChild(dialog);
-      dialog.showModal();
-      const term = new Terminal({ cursorBlink: true, fontSize: 14, fontFamily: 'Menlo, Consolas, monospace', scrollback: 3000, allowProposedApi: false });
-      const fit = new FitAddon.FitAddon();
-      term.loadAddon(fit);
-      term.open(dialog.querySelector('.telnet-screen'));
-      let socket = null, disposed = false, sessionID = '', transfer = null, connected = false;
-      const form = dialog.querySelector('form'), port = form.elements.port;
-      const state = dialog.querySelector('[data-state]'), disconnect = dialog.querySelector('[data-disconnect]');
-      const connect = form.querySelector('[type=submit]');
-      const uploadForm = dialog.querySelector('.ssh-upload');
-      const uploadState = dialog.querySelector('[data-upload-state]');
-      const refreshUpload = () => {
-        if (!uploadForm) return;
-        uploadForm.querySelector('[type=submit]').disabled = !sessionID || !!transfer;
-        uploadForm.querySelector('[data-cancel-upload]').disabled = !transfer;
-        ['file', 'directory', 'overwrite'].forEach(name => { uploadForm.elements[name].disabled = !!transfer; });
-      };
-      const setState = (text, active) => {
-        state.textContent = text; disconnect.disabled = !active; port.disabled = active; connect.disabled = active;
-        if (isSSH) { form.elements.username.disabled = active; form.elements.password.disabled = active; }
-      };
-      const send = msg => { if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(msg)); };
-      term.onData(data => { if (connected) send({ type: 'input', data }); });
-      term.onResize(({ cols, rows }) => { if (connected) send({ type: 'resize', cols, rows }); });
-      const resize = new ResizeObserver(() => { if (!disposed) fit.fit(); });
-      resize.observe(dialog.querySelector('.telnet-screen'));
-      const stop = () => {
-        const ws = socket; socket = null;
-        connected = false; sessionID = '';
-        if (transfer) transfer.abort();
-        if (isSSH) { form.elements.password.value = ''; dialog.querySelector('[data-hostkey]').classList.add('hidden'); }
-        refreshUpload();
-        if (ws) { ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null; ws.close(); }
-        setState('已断开', false);
-      };
-      closeTerminal = () => {
-        if (disposed) return;
-        disposed = true; stop(); resize.disconnect(); term.dispose(); dialog.close(); dialog.remove(); closeTerminal = null;
-      };
-      dialog.querySelector('[data-close]').onclick = () => closeTerminal();
-      dialog.addEventListener('cancel', ev => { ev.preventDefault(); closeTerminal(); });
-      disconnect.onclick = () => { stop(); term.writeln('\r\n[已断开连接]'); };
-      const keys = { enter: '\r', space: ' ', interrupt: '\x03', exit: '\x1a' };
-      dialog.querySelectorAll('[data-key]').forEach(b => { b.onclick = () => { if (connected) send({ type: 'input', data: keys[b.dataset.key] }); term.focus(); }; });
-      if (isSSH) {
-        dialog.querySelector('[data-reject]').onclick = stop;
-        uploadForm.querySelector('[data-cancel-upload]').onclick = () => { if (transfer) transfer.abort(); };
-        uploadForm.onsubmit = ev => {
-          ev.preventDefault();
-          const file = uploadForm.elements.file.files[0];
-          if (!file || !sessionID || transfer) return;
-          if (file.size > 1024 ** 3) { uploadState.textContent = '文件超过 1 GiB，请选择较小的文件。'; return; }
-          const url = new URL(`api/locate/ssh-upload/${sessionID}`, document.baseURI);
-          url.searchParams.set('name', file.name); url.searchParams.set('dir', uploadForm.elements.directory.value.trim());
-          url.searchParams.set('overwrite', uploadForm.elements.overwrite.checked ? '1' : '0');
-          const xhr = new XMLHttpRequest(); transfer = xhr;
-          const progress = uploadForm.querySelector('progress'); progress.value = 0;
-          uploadState.textContent = '正在上传…'; refreshUpload();
-          xhr.open('POST', url); xhr.setRequestHeader('Content-Type', 'application/octet-stream');
-          xhr.upload.onprogress = ev => { if (ev.lengthComputable) { progress.value = ev.loaded / ev.total * 100; uploadState.textContent = progress.value >= 100 ? '文件已发送，等待设备确认…' : `正在上传 ${Math.floor(progress.value)}%`; } };
-          xhr.onload = () => {
-            let result = {}; try { result = JSON.parse(xhr.responseText); } catch (_) { /* HTTP error without JSON */ }
-            if (xhr.status >= 200 && xhr.status < 300 && result.ok) { progress.value = 100; uploadState.textContent = `上传完成：${result.path}（${result.bytes} 字节）`; }
-            else uploadState.textContent = result.error || '上传失败，请检查连接、目录及 SFTP 服务后重试。';
-          };
-          xhr.onerror = () => { uploadState.textContent = '上传连接中断，请检查网络及远端文件后重试。'; };
-          xhr.onabort = () => { uploadState.textContent = '已取消上传；远端可能保留部分文件，请检查后重试。'; };
-          xhr.onloadend = () => { transfer = null; refreshUpload(); };
-          xhr.send(file);
-        };
-      }
-      form.onsubmit = ev => {
-        ev.preventDefault();
-        const username = isSSH ? form.elements.username.value.trim() : '';
-        let password = isSSH ? form.elements.password.value : '';
-        stop(); term.reset(); fit.fit();
-        const url = new URL(`api/locate/${protocol}/${encodeURIComponent(id)}`, document.baseURI);
-        url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        url.searchParams.set('port', port.value);
-        const ws = new WebSocket(url); socket = ws; ws.binaryType = 'arraybuffer';
-        setState('连接中…', true);
-        const endpoint = `${host.includes(':') && !host.startsWith('[') ? `[${host}]` : host}:${port.value}`;
-        term.writeln(`[正在连接 ${endpoint}…]`);
-        ws.onopen = () => {
-          if (isSSH) { send({ type: 'auth', username, password, cols: term.cols, rows: term.rows }); password = ''; }
-          else send({ type: 'resize', cols: term.cols, rows: term.rows });
-        };
-        ws.onmessage = ev => {
-          if (ev.data instanceof ArrayBuffer) term.write(new Uint8Array(ev.data));
-          else {
-            const msg = JSON.parse(ev.data);
-            if (msg.message) term.writeln(`\r\n[${msg.message}]`);
-            if (msg.type === 'hostkey') {
-              const box = dialog.querySelector('[data-hostkey]'); box.classList.remove('hidden');
-              box.querySelector('[data-fingerprint]').textContent = `${msg.address}\n${msg.fingerprint}`;
-              box.querySelector('[data-trust]').onclick = () => { send({ type: 'trust', fingerprint: msg.fingerprint }); box.classList.add('hidden'); };
-              state.textContent = '等待核对主机指纹';
-            }
-            if (msg.type === 'connected') {
-              connected = true; sessionID = msg.session || ''; setState(msg.message, true); refreshUpload();
-              if (isSSH) uploadState.textContent = '已连接，可选择文件并上传。';
-              send({ type: 'resize', cols: term.cols, rows: term.rows }); term.focus();
-            }
-          }
-        };
-        ws.onerror = () => { term.writeln(`\r\n[连接失败：请检查网页登录状态、已保存的地址、${title} 端口及服务器到交换机的网络，然后点击连接重试。]`); };
-        ws.onclose = () => { password = ''; stop(); term.writeln('\r\n[连接已关闭]'); };
-      };
-      fit.fit();
-      if (isSSH) form.elements.username.focus(); else form.requestSubmit();
-    }
 
     $('#lRun').onclick = () => run(false);
     $('#lDry').onclick = () => run(true);
@@ -3148,8 +3153,8 @@ snmp-agent community read 团体名</pre></div></div>
     const onLocateClick = async ev => {
       const b = ev.target.closest('[data-test],[data-table],[data-apply],[data-telnet],[data-ssh]');
       if (!b) return;
-      if (b.dataset.ssh) { openTerminal(b.dataset.ssh, 'ssh'); return; }
-      if (b.dataset.telnet) { openTerminal(b.dataset.telnet); return; }
+      if (b.dataset.ssh) { openTerminal(b.dataset.ssh, 'ssh', ((cfg.locate.switches || {})[b.dataset.ssh] || {}).host); return; }
+      if (b.dataset.telnet) { openTerminal(b.dataset.telnet, 'telnet', ((cfg.locate.switches || {})[b.dataset.telnet] || {}).host); return; }
       if (b.dataset.table) { showTable(b.dataset.table, true); return; }
       if (b.dataset.apply) {
         try { await api('POST', 'api/locate/apply', { node_id: b.dataset.apply }); toast('已修改接线位置'); await loadTopology(); await load(); }

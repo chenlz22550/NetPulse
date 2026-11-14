@@ -5,6 +5,7 @@ import (
 	"log"
 	"math"
 	"math/rand"
+	"net"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -47,6 +48,7 @@ type Sample struct {
 
 // Status 是一个目标的实时指标。
 type Status struct {
+	SSHOpen       bool      `json:"ssh_open"`
 	ID            string    `json:"id"`
 	Kind          string    `json:"kind"`
 	IP            string    `json:"ip"`
@@ -274,12 +276,15 @@ type minuteAgg struct {
 }
 
 type worker struct {
-	m      *Monitor
-	mu     sync.Mutex
-	target Target
-	ring   []Sample
-	head   int
-	n      int
+	sshOpen     bool
+	sshChecking bool
+	sshChecked  time.Time
+	m           *Monitor
+	mu          sync.Mutex
+	target      Target
+	ring        []Sample
+	head        int
+	n           int
 
 	consecFail int
 	consecOK   int
@@ -327,6 +332,10 @@ func (w *worker) setTarget(t Target) {
 		w.ring = ring
 		w.head = w.n
 	}
+	if old.IP != t.IP {
+		w.sshOpen = false
+		w.sshChecked = time.Time{}
+	}
 	w.target = t
 	w.mu.Unlock()
 	if old.Interval != t.Interval {
@@ -367,6 +376,7 @@ func (w *worker) run() {
 				log.Printf("ping %s(%s) 出错: %v", t.ID, t.IP, err)
 			}
 			w.record(time.Now(), res)
+			w.checkSSH()
 		}
 		select {
 		case <-w.quit:
@@ -376,6 +386,31 @@ func (w *worker) run() {
 		case <-ticker.C:
 		}
 	}
+}
+
+// checkSSH probes at most once per minute without delaying ICMP sampling.
+func (w *worker) checkSSH() {
+	w.mu.Lock()
+	if w.target.Kind != "node" || !w.hasLast || w.last.RTT < 0 || w.sshChecking || time.Since(w.sshChecked) < time.Minute {
+		w.mu.Unlock()
+		return
+	}
+	ip := w.target.IP
+	w.sshChecking = true
+	w.mu.Unlock()
+	go func() {
+		conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip, "22"), time.Second)
+		if conn != nil {
+			conn.Close()
+		}
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		w.sshChecking = false
+		if w.target.IP == ip {
+			w.sshOpen = err == nil
+			w.sshChecked = time.Now()
+		}
+	}()
 }
 
 func (w *worker) markPaused() {
@@ -506,6 +541,7 @@ func (w *worker) status(withSpark bool) Status {
 	if w.m.Paused() {
 		st.State = StatePaused
 	}
+	st.SSHOpen = w.sshOpen && (st.State == StateOK || st.State == StateSlow || st.State == StateLoss) && st.LastRTT >= 0
 	return st
 }
 

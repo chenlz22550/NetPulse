@@ -480,3 +480,10 @@ svg.picking .card:hover .bg { stroke: var(--accent); stroke-width: 2.5; }
 .opt-chk .r { margin-left: auto; }
 .btn.accent:hover { background: #e84d14; }
 @media (max-width: 600px) { .opt-chk .r { margin-left: 0; } }
+
+.node-ssh { cursor: pointer; }
+.node-ssh rect { fill: var(--panel); stroke: var(--ink-3); }
+.node-ssh text { fill: var(--ink); font: 11px var(--mono); }
+.node-ssh:hover rect, .node-ssh:focus rect { stroke: var(--accent); }
+
+.card.gateway .node-ssh text { fill: var(--ink) !important; }
