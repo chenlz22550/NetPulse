@@ -2,6 +2,8 @@
 """Build a self-contained, searchable Wiki. No scripts or assets from a CDN."""
 from pathlib import Path, PurePosixPath
 import html
+import base64
+import mimetypes
 import posixpath
 import re
 import markdown
@@ -42,6 +44,8 @@ nav a{display:block;padding:7px 10px;margin:3px 0;font-size:14px;text-decoration
 nav a[aria-current=page]{border-color:var(--accent);background:var(--code);font-weight:bold}
 main{min-width:0;padding:46px clamp(18px,5vw,72px);background:var(--panel);min-height:85vh}
 section{max-width:830px;min-width:0}
+section img{display:block;max-width:100%;height:auto;border:1px solid var(--line);margin:18px 0;cursor:zoom-in}
+section a:has(>img){display:block}
 .js section[data-page]{display:none}.js section[data-page].active{display:block}
 h1{font-size:clamp(28px,5vw,48px);letter-spacing:-1px;line-height:1.3;margin:8px 0 32px;font-weight:700}
 h2{font-size:23px;margin:38px 0 14px;padding-top:12px;border-top:1px solid var(--line)}
@@ -194,11 +198,28 @@ def resolve_link(source: str, m: re.Match) -> str:
     return f'href="{REPO_URL}/{kind}/main/{html.escape(norm, quote=True)}{html.escape(suffix, quote=True)}"'
 
 
+def embed_image(source: str, match: re.Match) -> str:
+    """Inline repository images so the built Wiki also works offline."""
+    target = html.unescape(match.group(1))
+    if target.startswith(('data:', 'http:', 'https:')):
+        return match.group(0)
+    path = (ROOT / PurePosixPath(source).parent / target).resolve()
+    if not path.is_relative_to(ROOT):
+        raise ValueError(f'Image is outside the repository: {target}')
+    mime = mimetypes.guess_type(path.name)[0]
+    if mime not in ('image/webp', 'image/png', 'image/jpeg', 'image/gif'):
+        raise ValueError(f'Unsupported image format: {target}')
+    encoded = base64.b64encode(path.read_bytes()).decode('ascii')
+    return f'src="data:{mime};base64,{encoded}"'
+
+
 nav = []
 sections = []
 for slug, title, source in PAGES:
     text = (ROOT / source).read_text(encoding='utf-8')
     body = markdown.markdown(text, extensions=['tables', 'fenced_code', 'sane_lists'])
+    body = re.sub(r'(<img[^>]+src="([^"]+)"[^>]*>)', r'<a href="\2" target="_blank" rel="noopener" aria-label="查看原图">\1</a>', body)
+    body = re.sub(r'src="([^"]+)"', lambda m, s=source: embed_image(s, m), body)
     body = re.sub(r'href="([^"]+)"', lambda m, s=source: resolve_link(s, m), body)
     body = body.replace('<table>', '<div class="table-wrap"><table>').replace('</table>', '</table></div>')
     nav.append(f'<a href="#{slug}">{html.escape(title)}</a>')
