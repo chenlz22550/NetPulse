@@ -75,9 +75,12 @@ func (s *Server) aiClient(c config.Config) *llm.Client {
 	}
 }
 
-func aiTools() []llm.Tool {
+func aiTools() []llm.Tool { return aiToolsOf(aiToolNames) }
+
+// aiToolsOf 把工具名列表转成模型可用的工具定义。
+func aiToolsOf(names []string) []llm.Tool {
 	var out []llm.Tool
-	for _, name := range aiToolNames {
+	for _, name := range names {
 		if t := findTool(name); t != nil {
 			out = append(out, llm.Tool{Type: "function", Function: llm.ToolFunction{Name: t.Name, Description: t.Description, Parameters: t.Schema}})
 		}
@@ -85,8 +88,10 @@ func aiTools() []llm.Tool {
 	return out
 }
 
-func aiAllowed(name string) bool {
-	for _, n := range aiToolNames {
+func aiAllowed(name string) bool { return inList(aiToolNames, name) }
+
+func inList(list []string, name string) bool {
+	for _, n := range list {
 		if n == name {
 			return true
 		}
@@ -120,8 +125,13 @@ func aiJSON(v interface{}, limit int) string {
 
 // runAITool 执行模型发起的工具调用。
 func (s *Server) runAITool(name, args, remote string) (string, string) {
+	return s.runAIToolIn(aiToolNames, name, args, remote)
+}
+
+// runAIToolIn 执行模型发起的工具调用，只允许 allowed 中的只读工具。
+func (s *Server) runAIToolIn(allowed []string, name, args, remote string) (string, string) {
 	t := findTool(name)
-	if t == nil || !aiAllowed(name) || t.Write {
+	if t == nil || !inList(allowed, name) || t.Write {
 		return "", `{"error":"不允许调用该工具"}`
 	}
 	a := map[string]json.RawMessage{}
@@ -160,6 +170,10 @@ func (s *Server) handleAI(w http.ResponseWriter, r *http.Request, arg string) er
 		return s.handleAIOptimize(w, r)
 	case arg == "optimize/apply" && r.Method == http.MethodPost:
 		return s.handleAIOptimizeApply(w, r)
+	case arg == "discover" && r.Method == http.MethodPost:
+		return s.handleAIDiscover(w, r)
+	case arg == "discover/apply" && r.Method == http.MethodPost:
+		return s.handleAIDiscoverApply(w, r)
 	}
 	return notFound("接口")
 }
@@ -440,8 +454,13 @@ type aiRunResult struct {
 
 // aiLoop 与模型多轮对话：模型可调用只读工具，直到给出不含工具调用的回复或达到轮数上限。
 func (s *Server) aiLoop(ctx context.Context, c config.Config, msgs []llm.Message, maxRounds, maxTokens int, remote string, emit func(map[string]interface{})) (aiRunResult, error) {
+	return s.aiLoopWith(ctx, c, msgs, aiToolNames, maxRounds, aiMaxToolCalls, maxTokens, remote, emit)
+}
+
+// aiLoopWith 同 aiLoop，可指定允许的工具和工具调用次数上限。
+func (s *Server) aiLoopWith(ctx context.Context, c config.Config, msgs []llm.Message, names []string, maxRounds, maxCalls, maxTokens int, remote string, emit func(map[string]interface{})) (aiRunResult, error) {
 	cl := s.aiClient(c)
-	tools := aiTools()
+	tools := aiToolsOf(names)
 	var res aiRunResult
 	for round := 0; ; round++ {
 		if round > 0 {
@@ -450,7 +469,7 @@ func (s *Server) aiLoop(ctx context.Context, c config.Config, msgs []llm.Message
 			emit(map[string]interface{}{"t": "status", "text": "正在请求模型…"})
 		}
 		useTools := tools
-		if round >= maxRounds || res.Calls >= aiMaxToolCalls {
+		if round >= maxRounds || res.Calls >= maxCalls {
 			useTools = nil // 最后一轮不再给工具，强制给出结论
 		}
 		msg, usage, err := cl.Stream(ctx, llm.Request{Messages: msgs, Tools: useTools, MaxTokens: maxTokens}, func(d string) {
@@ -469,16 +488,20 @@ func (s *Server) aiLoop(ctx context.Context, c config.Config, msgs []llm.Message
 		}
 		msgs = append(msgs, msg)
 		res.Calls += len(msg.ToolCalls)
-		msgs = append(msgs, s.aiExecCalls(msg.ToolCalls, remote, "", emit)...)
+		msgs = append(msgs, s.aiExecCallsIn(names, msg.ToolCalls, remote, "", emit)...)
 		emit(map[string]interface{}{"t": "break"})
 	}
 }
 
 // aiExecCalls 执行一轮工具调用，返回对应的 tool 消息；phase 非空时附加在 tool 事件上（如自检阶段的 "review"）。
 func (s *Server) aiExecCalls(calls []llm.ToolCall, remote, phase string, emit func(map[string]interface{})) []llm.Message {
+	return s.aiExecCallsIn(aiToolNames, calls, remote, phase, emit)
+}
+
+func (s *Server) aiExecCallsIn(names []string, calls []llm.ToolCall, remote, phase string, emit func(map[string]interface{})) []llm.Message {
 	out := make([]llm.Message, 0, len(calls))
 	for _, tc := range calls {
-		title, result := s.runAITool(tc.Function.Name, tc.Function.Arguments, remote)
+		title, result := s.runAIToolIn(names, tc.Function.Name, tc.Function.Arguments, remote)
 		ev := map[string]interface{}{"t": "tool", "name": tc.Function.Name, "title": title, "args": truncRunes(tc.Function.Arguments, 300)}
 		if phase != "" {
 			ev["phase"] = phase

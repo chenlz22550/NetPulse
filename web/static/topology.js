@@ -12,7 +12,7 @@
   const ROW = CARD_H + 14;
   const JW = 17, JH = 13, SFPW = 21, COLGAP = 6, BLOCK_GAP = 6, SFP_GAP = 16;
 
-  const FLAG_TAGS = { gateway: '默认网关', suspect: '存疑', unlocated: '未定位', jump_host: '跳板机', no_ipv4: '无 IPv4', critical: '关键', discovered: '自动发现' };
+  const FLAG_TAGS = { gateway: '默认网关', suspect: '存疑', unlocated: '未定位', jump_host: '跳板机', no_ipv4: '无 IPv4', critical: '关键', discovered: '自动发现', ai_discovered: 'AI 发现' };
 
   function trunc(s, n) { s = String(s || ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; }
   // 按显示宽度截断：中文等宽字符算 1.7 个西文字符宽

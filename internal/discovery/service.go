@@ -952,3 +952,82 @@ func (s *Service) ApplySuggestion(nodeID, ip, ipMode string) (Change, error) {
 	s.recordEvents([]Change{ch})
 	return ch, nil
 }
+
+// ---------------------------------------------------------------------------
+// 只读探测（AI 自主发现 / MCP 使用）
+
+// ProbeMaxHosts 一次只读探测最多的地址数。
+const ProbeMaxHosts = 1024
+
+// Probe 只读探测网段：ping 扫描 + 读取 ARP + 解析主机名 + 标注是否已登记，不修改拓扑、不保存结果。
+// 与定时扫描共用“正在扫描”标记，避免同时大量发包。
+func (s *Service) Probe(subnets []string, reason string) ([]Host, error) {
+	d := s.Cfg.Get().Discovery
+	subnets = trimList(subnets)
+	if len(subnets) == 0 {
+		return nil, errors.New("请指定要探测的网段，如 192.168.1.0/24")
+	}
+	ips, err := config.ExpandSubnets(subnets, d.Exclude)
+	if err != nil {
+		return nil, err
+	}
+	if len(ips) > ProbeMaxHosts {
+		return nil, fmt.Errorf("一次最多探测 %d 个地址（本次 %d 个），请拆小网段", ProbeMaxHosts, len(ips))
+	}
+	if !s.begin() {
+		return nil, ErrRunning
+	}
+	defer s.end()
+	s.mu.Lock()
+	s.current = reason
+	s.mu.Unlock()
+	alive := s.sweep(ips, d)
+	s.setPhase("读取 ARP 表", len(ips), len(ips))
+	arp, _ := ReadARP()
+	var tmp ScanResult
+	hosts := mergeHosts(ips, alive, arp, d.Exclude, &tmp)
+	markLocal(hosts)
+	s.setPhase("解析主机名", len(ips), len(ips))
+	ResolveNames(hosts)
+	t, _ := s.Topo.Snapshot()
+	MarkKnown(hosts, t, d.OUI)
+	return hosts, nil
+}
+
+// MarkKnown 补全厂商，并标注每个地址在拓扑中的状态：switch / registered（node_id）/ new；本机为 local。
+func MarkKnown(hosts []Host, t *topology.Topology, oui map[string]string) {
+	byIP, byMAC := map[string]string{}, map[string]string{}
+	for _, n := range t.Nodes {
+		if n.IP != "" {
+			byIP[n.IP] = n.ID
+		}
+		if n.MAC != "" {
+			byMAC[n.MAC] = n.ID
+		}
+	}
+	swIP := map[string]string{}
+	for _, sw := range t.Switches {
+		if sw.IP != "" {
+			swIP[sw.IP] = sw.ID
+		}
+	}
+	vendors := LearnOUI(t, oui)
+	for i := range hosts {
+		h := &hosts[i]
+		if h.Vendor == "" {
+			h.Vendor = VendorOf(h.MAC, vendors)
+		}
+		switch {
+		case swIP[h.IP] != "":
+			h.NodeID, h.Status = swIP[h.IP], "switch"
+		case byIP[h.IP] != "":
+			h.NodeID, h.Status = byIP[h.IP], "registered"
+		case h.MAC != "" && len(h.SharedMAC) == 0 && byMAC[h.MAC] != "":
+			h.NodeID, h.Status = byMAC[h.MAC], "moved" // 已登记设备换了 IP
+		case h.Local:
+			h.Status = "local"
+		default:
+			h.Status = "new"
+		}
+	}
+}

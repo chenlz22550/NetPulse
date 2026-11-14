@@ -31,7 +31,7 @@
 | 拓扑 | 交换机、端口、终端卡片实时显示延迟和丢包；拖动卡片或交换机标题调整位置；点击编辑节点/交换机/链路；新增交换机、节点、链路；检索、按厂商和类别筛选 |
 | 监控列表 | 所有地址的当前延迟、1 分钟平均、抖动、1m/5m/1h 丢包率、最近 60 次迷你曲线，可排序筛选；逐个或批量开关告警；设备上锁保护；预览确认后一键清理无 IP 或关闭监控的终端，保留已上锁设备、交换机和历史数据 |
 | 节点详情 | 延迟曲线（平均值 + 最小~最大区间 + 阈值线）和丢包柱状图，范围 15 分钟 ~ 30 天 |
-| 扫描发现 | 立即/定时扫描网段，自动添加新设备（未定位）、按 MAC 跟踪 IP 变化、待确认建议、未登记设备、在线地址表、变更记录、扫描设置 |
+| 扫描发现 | 立即/定时扫描网段，自动添加新设备（未定位）、按 MAC 跟踪 IP 变化、待确认建议、未登记设备、在线地址表、变更记录、扫描设置；「AI 自主发现」由模型自己找网段、识别新设备并查出接线端口 |
 | 端口定位 | SNMP 只读读取交换机 MAC 地址表，自动确定设备接在哪个端口；交换机读取设置与测试、端口变化待确认、MAC 表、内置 Telnet / SSH 终端与 SFTP 文件上传 |
 | 告警 | 告警历史及发送结果 |
 | 设置 | 企业微信机器人配置与测试发送、监控时段、默认 ping 参数、机房信息、在线编辑/导入/下载 topology.yaml、从磁盘重新加载 |
@@ -94,6 +94,23 @@
 
 诊断时会把相关设备的 IP、MAC、名称和延迟丢包数据发送给模型服务商。API Key 保存在 `config.yaml`，网页和 MCP 都不会返回它。
 
+### 扫描发现页「AI 自主发现」
+
+不知道网络里还有哪些网段、哪些设备时，在「扫描发现」页点「✦ AI 自主发现」（可写要求，如“重点找二楼的摄像头”，或指定网段、选择探测范围）。模型自己规划整个过程：
+
+1. **找线索**（get_network_context）：本机网卡与网段、本机 ARP 表按 /24 分组、拓扑中已有设备分布、扫描任务覆盖情况、交换机 SNMP 配置，列出“有线索但没有扫描任务覆盖”的候选网段。
+2. **只读探测**（probe_subnet）：ping + ARP + 主机名，标注每个地址是新设备、已登记、已登记设备换了 IP、交换机还是本机。**不修改拓扑。**
+3. **识别设备**（fingerprint_host）：探测常见端口（打印 9100/515/631、RTSP 554、海康 8000、大华 37777、远程桌面 3389、SMB 445、SIP 5060、Winbox 8291 等），
+   读取网页标题 / Server 头 / 证书名称、SSH / FTP / Telnet 横幅、SNMP 系统描述（使用端口定位的团体名），结合主机名和 MAC 厂商给出类型线索。
+4. **查接线**（locate_device）：有 MAC 的新设备在交换机 MAC 表中查出接在哪个端口。
+5. 给出清单：**新增设备**（建议名称、类别、依据、把握、接线、是否告警，可在页面上修改）、**新增扫描任务**（没有任务覆盖的网段）、**其他发现**（IP 冲突、疑似私接路由器等）。
+
+服务器会校验每条建议：地址必须是最近实际探测到、且尚未登记的（MAC、厂商、主机名以实际探测为准，不采用模型给的值），接线端口必须存在，扫描任务网段不能与现有任务重复。
+勾选后点「添加所选」才写入，新设备带 `ai_discovered` 标记和类别标签，可在提示中撤销（只删除本次添加的设备和扫描任务）。
+
+**安全限制**：探测只针对私有地址（10/8、172.16/12、192.168/16、100.64/10、169.254/16）和已配置的机房 / 扫描网段，单次最多 1024 个地址；不会猜测 SNMP 团体名或登录设备。
+这三个工具同样开放给 MCP 客户端，并提供提示词 `discover_devices`。
+
 ### 拓扑页「AI 一键优化」
 
 拓扑页左上角的「✦ AI 一键优化」会把全部设备的厂商、主机名、接线、告警设置和近 7 天的丢包/延迟/中断统计交给模型，生成三类结果：
@@ -118,10 +135,11 @@ AI 客户端连接需要访问令牌：在「MCP」页点「生成」并保存�
 | 现场核实 | get_switch_ports、tcp_check、arp_lookup、trace_route、dns_lookup |
 | 端口定位 | get_locate_status、get_switch_mac_table、locate_device、auto_locate（可只预览）、apply_location、test_switch_snmp、set_locate_settings |
 | 扫描 | upsert_scan_job、delete_scan_job、scan_network（可临时扫描指定网段）、set_discovery_settings、add_discovered_devices、apply_ip_suggestion |
+| 自主发现 | get_network_context（网络线索与候选网段）、probe_subnet（只读探测网段，不改拓扑）、fingerprint_host（端口 / 网页 / 横幅 / SNMP 指纹识别设备类型） |
 | 设置 | set_alert_config、send_test_alert、set_ping_defaults、set_site、set_schedule、set_monitoring_paused、set_ai_settings（AI 启用、协议格式、深度思考、回答前自检、模型、超时；不能改 API Key / 接口地址 / 代理） |
 | 修改 | reset_layout、upsert_device、delete_device、upsert_switch、delete_switch、upsert_link、delete_link、set_alerting、replace_topology_yaml（默认只校验）、reload_topology_from_disk |
 
-另提供资源（当前拓扑、字段说明、JSON Schema、实时状态）和提示词模板 `generate_topology`（按 MAC/ARP 表生成拓扑）、`health_report`（网络健康报告）。
+另提供资源（当前拓扑、字段说明、JSON Schema、实时状态）和提示词模板 `generate_topology`（按 MAC/ARP 表生成拓扑）、`health_report`（网络健康报告）、`discover_devices`（自主发现设备）。
 
 `config.yaml` 中的 `mcp` 段：`enabled` 开关、`read_only` 只读模式、`token` 访问令牌（设置后客户端需带 `Authorization: Bearer <token>`）。
 所有写操作记录在 `logs/netping.log`。
