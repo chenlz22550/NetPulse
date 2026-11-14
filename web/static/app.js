@@ -108,6 +108,24 @@
     if (s) return { kind: 'switch', obj: s };
     return null;
   }
+  if (Charts.setDeviceResolver) {
+    Charts.setDeviceResolver(hint => {
+      if (!S.topo || !hint) return null;
+      const all = S.topo.switches.concat(S.topo.nodes);
+      const s = String(hint).trim();
+      for (const d of all) {
+        if (d.id === s || (d.ip && d.ip === s) || (d.name && d.name === s)) return d;
+      }
+      const ipMatch = s.match(/\b(\d{1,3}(?:\.\d{1,3}){3})\b/);
+      if (ipMatch) {
+        const hit = all.find(d => d.ip === ipMatch[1]);
+        if (hit) return hit;
+      }
+      const named = all.filter(d => d.name && d.name.length >= 2 && s.includes(d.name))
+        .sort((a, b) => b.name.length - a.name.length);
+      return named[0] || null;
+    });
+  }
   function computeVendorColors() {
     const cnt = {};
     S.topo.nodes.forEach(n => { const v = n.vendor || '未知'; cnt[v] = (cnt[v] || 0) + 1; });
@@ -349,7 +367,7 @@
           <li>第一次使用：在页面右侧填写 API Key（在 DeepSeek 开放平台创建），点「测试连接」确认正常。服务器不能直接上网时，可填写 HTTP 代理（留空则使用告警设置里的代理）。</li>
           <li>点「一键诊断」「最近 1 小时」「分析告警」等快捷按钮，或直接描述现象，如“3 楼打印机经常连不上”。可以接着追问。</li>
           <li>在拓扑页的设备详情、设备曲线页点「AI 诊断」，会直接诊断这一台设备。</li>
-          <li>AI 会按需查询设备列表、历史曲线、告警记录、扫描与端口定位结果，回答上方会显示它查了什么。AI <b>只能查询，不能修改</b>任何配置。</li>
+          <li>AI 会按需查询设备列表、历史曲线、告警记录、扫描与端口定位结果，回答上方会显示它查了什么；遇到复杂故障还会直接画出<b>故障路径图、对比柱状图、趋势曲线或异常时间线</b>。AI <b>只能查询，不能修改</b>任何配置。</li>
           <li>「深度思考」更慢、更贵，复杂问题时再开。每次诊断下方显示用时、查询次数和 token 用量。</li>
         </ul>
         <div class="g-note">诊断时会把相关设备的 IP、MAC、名称和延迟丢包数据发送给模型服务商。API Key 保存在 config.yaml，网页和 MCP 都不会返回它。</div>
@@ -402,7 +420,7 @@
 
   // ---------------------------------------------------------------------------
   // AI 诊断页
-  // 轻量 Markdown 渲染：先转义再处理标题、列表、粗体、行内代码、代码块、表格
+  // 轻量 Markdown 渲染：先转义再处理标题、列表、粗体、行内代码、代码块（含可视化图表）、表格
   function mdLite(src) {
     const inline = t => esc(t)
       .replace(/`([^`]+)`/g, '<code>$1</code>')
@@ -412,13 +430,19 @@
     const closeList = () => { if (list) { html += `</${list}>`; list = null; } };
     while (i < lines.length) {
       const l = lines[i];
-      if (/^```/.test(l)) {
+      let fm;
+      if ((fm = l.match(/^\s*```(.*)$/))) {
         closeList();
+        const lang = (fm[1] || '').trim().toLowerCase();
         const buf = [];
         i++;
-        while (i < lines.length && !/^```/.test(lines[i])) buf.push(lines[i++]);
-        i++;
-        html += `<pre class="ai-code">${esc(buf.join('\n'))}</pre>`;
+        while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) buf.push(lines[i++]);
+        const closed = i < lines.length;
+        if (closed) i++;
+        const raw = buf.join('\n');
+        const chartHTML = window.Charts && Charts.aiBlock ? Charts.aiBlock(lang, raw, closed) : '';
+        if (chartHTML) { html += chartHTML; continue; }
+        html += `<pre class="ai-code">${esc(raw)}</pre>`;
         continue;
       }
       if (/^\s*\|.*\|\s*$/.test(l) && i + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1])) {
@@ -470,6 +494,7 @@
         <div class="panel"><div class="ph">模型设置<span class="r" id="aiState"></span></div><div class="pb"><form id="aiSet"></form></div></div>
         <div class="panel"><div class="ph">说明</div><div class="pb"><ul class="help" style="margin:0;padding-left:18px">
           <li>AI 会先看当前概况，再按需查询设备列表、历史曲线、告警记录、扫描与端口定位结果，最后给出结论和排查步骤。</li>
+          <li>复杂问题会自动附带<b>可视化图表</b>（故障路径图、多设备对比柱状图、延迟丢包趋势曲线、异常时段对齐时间线），点击图中的设备可直接查看详情。</li>
           <li>AI 只能<b>查询</b>和<b>现场探测</b>（ping、TCP 端口、ARP、路由追踪、DNS、通过 SNMP 读交换机端口状态），不能修改任何配置。</li>
           <li>开启「回答前自检」后，AI 写完回答会对照数据逐条核对，缺证据时再实测；核对通过显示 ✓，发现问题会直接给出修正后的回答（可展开查看初稿）。</li>
           <li>诊断时会把相关设备的 IP、MAC、名称、延迟丢包数据发送给模型服务商（默认 DeepSeek）。</li>
