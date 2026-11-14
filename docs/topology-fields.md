@@ -102,6 +102,7 @@ nodes: [...]        # 终端节点
 | jump_host | 跳板机 | 黑色标签 |
 | no_ipv4 | 没有 IPv4 地址 | |
 | discovered | 由网段扫描自动添加 | 「自动发现」标签 |
+| ai_discovered | 由「AI 自主发现」添加（撤销时只会删除带此标记的设备） | 「AI 发现」标签 |
 
 ### monitor
 

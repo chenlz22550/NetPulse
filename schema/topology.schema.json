@@ -122,7 +122,7 @@
           "type": "array",
           "uniqueItems": true,
           "description": "状态标记",
-          "items": { "enum": ["gateway", "suspect", "unlocated", "arp_only", "jump_host", "no_ipv4", "critical", "discovered"] }
+          "items": { "enum": ["gateway", "suspect", "unlocated", "arp_only", "jump_host", "no_ipv4", "critical", "discovered", "ai_discovered"] }
         },
         "tags": { "type": "array", "items": { "type": "string" } },
         "note": { "type": "string" },

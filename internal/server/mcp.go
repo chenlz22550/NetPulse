@@ -1016,6 +1016,7 @@ func init() {
 	}
 	mcpTools = append(mcpTools, analysisTools()...)
 	mcpTools = append(mcpTools, probeTools()...)
+	mcpTools = append(mcpTools, discoverTools()...)
 }
 
 // ---------------------------------------------------------------------------
@@ -1730,6 +1731,23 @@ ARP 表：
 3. 调用 list_alerts(limit=50) 查看该时间段内的告警。
 4. 按接线位置（交换机/端口）归纳问题：同一交换机或同一端口下多台设备同时异常，说明可能是交换机、上联或口后集线器问题。
 5. 输出：总体结论、异常设备表（IP、名称、位置、丢包率、平均/最大延迟）、可能原因与建议；如发现重要设备未开启告警，一并提示。`, rg, rg)
+		},
+	},
+	{
+		name: "discover_devices", title: "自主发现设备",
+		desc: "由 AI 自己找网段、探测、识别新设备并查出接线端口，确认后添加到拓扑",
+		args: []map[string]interface{}{
+			promptArg("focus", "重点（可空），如：二楼的摄像头、打印机；有没有私接路由器", false),
+			promptArg("subnets", "指定要探测的网段（可空，逗号分隔）", false),
+		},
+		build: func(s *Server, a map[string]string) string {
+			return fmt.Sprintf(`请用 netPing 的工具自主发现网络中还没有登记的设备：
+1. 调用 get_network_context，根据本机网卡、ARP 分组、拓扑分组和 candidate_subnets 决定要探测的网段（有依据，不要盲目遍历）。指定网段：%s
+2. 用 probe_subnet 只读探测（每次最多 4 个 /24），只关注 status=new 的地址。
+3. 用 fingerprint_host（每次最多 8 个）识别值得识别的新设备；有 MAC 的用 locate_device 查接在哪个交换机端口。
+4. 把结果整理成表格给我确认：IP、MAC、厂商、建议名称、类别、依据、接线、是否建议告警；以及建议新增的扫描任务和其他发现（IP 冲突、私接路由器等）。
+5. 我确认后，再用 upsert_device 逐台添加（有端口的填 attach，类别写成标签），用 upsert_scan_job 新建扫描任务。确认前不要做任何修改。
+重点：%s`, orDefault(a["subnets"], "（无，由你决定）"), orDefault(a["focus"], "（无，全面发现）"))
 		},
 	},
 }

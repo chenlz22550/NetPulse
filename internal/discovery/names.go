@@ -276,3 +276,6 @@ func localHostname() string {
 	}
 	return CleanHostname(h, "")
 }
+
+// LookupName 依次尝试 NetBIOS、mDNS、反向 DNS 得到主机名（找不到返回空）。
+func LookupName(ip string) string { return lookupHost(ip) }
