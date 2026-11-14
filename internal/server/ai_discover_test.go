@@ -152,7 +152,7 @@ func TestAIDiscoverFlow(t *testing.T) {
 	final := "**总结**：探测了 192.168.7.0/24，发现 2 台新设备。\n```json\n" + `{
 "devices":[
  {"ip":"192.168.7.10","kind":"node","name":"财务部打印机","category":"打印机","alert":false,"switch":"access","port":"5","confidence":"high","evidence":"9100 开放","mac":"FF:FF:FF:FF:FF:FF"},
- {"ip":"192.168.7.2","kind":"switch","name":"二楼接入交换机","alert":true,"confidence":"medium","evidence":"SNMP Comware"},
+ {"ip":"192.168.7.2","kind":"switch","type":"firewall","name":"二楼防火墙","alert":true,"confidence":"medium","evidence":"SNMP Comware"},
  {"ip":"192.168.7.99","kind":"node","name":"编造的设备"},
  {"ip":"192.168.101.232","kind":"node","name":"已登记"},
  {"ip":"192.168.7.10","kind":"node","name":"重复"}],
@@ -240,7 +240,7 @@ func TestAIDiscoverFlow(t *testing.T) {
 		t.Fatalf("新节点不对：%+v", n)
 	}
 	_, sid := tp.FindByIP("192.168.7.2")
-	if sw := tp.FindSwitch(sid); sw == nil || sw.Name != "二楼接入交换机" || !sw.Monitor.Alert {
+	if sw := tp.FindSwitch(sid); sw == nil || sw.Name != "二楼防火墙" || sw.DeviceType() != "firewall" || !sw.Monitor.Alert {
 		t.Fatalf("新交换机不对：%+v", sw)
 	}
 	// 再次应用：已登记，全部跳过

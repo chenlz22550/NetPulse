@@ -255,3 +255,18 @@ internal/server            REST API + SSE 实时推送
 internal/tray              托盘图标与菜单
 web/static                 管理页面（原生 JS + SVG，无构建步骤，打包进 exe）
 ```
+
+## 自动化测试
+
+需要 Go（版本要求见 `go.mod`）和 Node.js 18+；前端图表测试不依赖 npm 包。
+
+```sh
+go test -count=1 ./...
+go test -race -count=1 ./...
+go vet ./...
+node --test web/charts_test.cjs
+```
+
+测试通过临时目录、本地 HTTP/UDP 模拟服务运行，不使用生产拓扑或向真实企业微信群发送消息；运行环境需要允许监听本地端口。
+
+最近合并功能的验证范围、覆盖率与限制见 [合并回归测试记录](docs/testing/2026-11-14-merge-regression.md)。

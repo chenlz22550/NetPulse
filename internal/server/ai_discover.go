@@ -117,6 +117,8 @@ func notesOf(raw json.RawMessage) []string {
 	if json.Unmarshal(raw, &ss) == nil {
 		return ss
 	}
+	// Unmarshal 失败时可能已分配并部分填充 ss，切换格式前清除残留。
+	ss = nil
 	var objs []map[string]interface{}
 	if json.Unmarshal(raw, &objs) == nil {
 		for _, o := range objs {
