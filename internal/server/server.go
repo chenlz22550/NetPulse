@@ -51,6 +51,8 @@ type Server struct {
 	sshMu          sync.Mutex
 	sshSessions    map[string]*sshTerminal
 	sshHostMu      sync.Mutex
+	seenMu         sync.Mutex
+	seen           map[string]seenHost // AI 自主发现 / MCP 探测中实际看到的地址（用于校验 AI 建议）
 }
 
 // Start 开始监听，返回实际监听地址。

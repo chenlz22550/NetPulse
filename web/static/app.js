@@ -45,6 +45,31 @@
     }
     return data;
   }
+  // 读取 NDJSON 流式接口（AI 分析），每行一个事件交给 onEvent
+  async function streamNDJSON(url, body, signal, onEvent) {
+    const r = await fetch(url, { method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      if (r.status === 401 && d.login_required) { toLogin(); throw new Error('登录已过期，请重新登录'); }
+      throw new Error(d.error || 'HTTP ' + r.status);
+    }
+    const rd = r.body.getReader(), dec = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { value, done } = await rd.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let k;
+      while ((k = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, k).trim();
+        buf = buf.slice(k + 1);
+        if (!line) continue;
+        let ev;
+        try { ev = JSON.parse(line); } catch (e) { continue; }
+        onEvent(ev);
+      }
+    }
+  }
   // 登录过期或密码被修改：跳到登录页，登录后回到当前页面
   function toLogin() { location.replace('/login.html' + location.hash); }
   let toastTimer = 0;
@@ -328,6 +353,9 @@
           <li><b>按 MAC 跟踪 IP</b>：DHCP 设备换了 IP 时，自动把这台设备的 IP 改成新地址，历史曲线、告警开关和接线位置都保留。设备的「IP 分配方式」设为“静态锁定”时只提示、不自动改。</li>
           <li><b>防误报</b>：可跟踪的设备突然 ping 不通时会立即重新扫描，找到新 IP 就更新，不会误报离线。</li>
           <li><b>主机名</b>：每次扫描都会查询在线设备的主机名（Windows 计算机名、苹果 / Linux / 打印机等的 .local 名、DNS 名），记录在设备的「主机名」里；没有填写名称的设备在拓扑图上显示主机名，也可以按主机名检索。手机等设备通常不公布主机名。</li>
+          <li><b>AI 自主发现</b>：不知道还有哪些网段、哪些设备时，点「✦ AI 自主发现」（可写上要求或指定网段）。AI 会根据本机网卡、ARP 表、已有设备推断要探测的网段，
+            只读扫描后识别新设备的类型（看开放端口、网页标题、SNMP 描述、主机名、厂商），能定位的查出接在哪个交换机口，最后列出建议添加的设备、建议新建的扫描任务和其他发现
+            （如私接路由器）。名称、类别、告警都可以改，勾选后才添加，添加后可以撤销。只探测私有地址和已配置的网段，需要先在「AI 诊断」页设置模型。</li>
           <li>扫描时读取电脑的 ARP 表获得 MAC，所以<b>只能看到和运行 netPing 的电脑在同一网段（VLAN）的设备 MAC</b>；其他网段只能发现在线。</li>
         </ul>
         <div class="g-note">macOS 上第一次扫描时，如果系统询问“允许 netPing 查找本地网络上的设备”，请选择<b>允许</b>，否则读不到 MAC。</div>
@@ -2010,6 +2038,12 @@
           <li>外网打不开，追踪一下到 223.5.5.5 断在哪一跳，再看看 DNS 解析正不正常</li>
           <li>把 AI 诊断的回答前自检打开</li>
         </ul></div>
+        <div><b>自主发现</b><ul>
+          <li>帮我找找网络里还有哪些没登记的设备，识别一下分别是什么、接在哪个口（使用提示词 discover_devices）</li>
+          <li>只读探测 192.168.2.0/24，看看有没有摄像头和打印机，先别添加</li>
+          <li>识别一下 192.168.101.77 是什么设备，开了哪些服务</li>
+          <li>看看有没有私接的路由器或无线 AP</li>
+        </ul></div>
         <div><b>节点维护</b><ul>
           <li>把 192.168.101.88 的接线位置改成接入交换机 Port 5，位置填 A03 机柜</li>
           <li>新增一台服务器 192.168.101.60，名称“备份存储”，接在核心 Gi0/7，开启告警</li>
@@ -2223,6 +2257,18 @@
     let timer = 0, data = null, cfg = null, hostFilter = '', hostState = '', wasRunning = false, view = '', editing = null;
     app.innerHTML = `<div class="page pad"><div class="settings">
       <div>
+        <div class="panel"><div class="ph">✦ AI 自主发现</div><div class="pb"><form id="dAi">
+          <div class="help" style="margin-top:0">让 AI 自己找设备：先汇总本机网卡、ARP 表、已有设备和扫描任务等线索，决定探测哪些网段；
+            再识别新设备是什么（端口、网页标题、SNMP 描述、主机名、厂商），能定位的查出接在哪个交换机端口；最后给出<b>新增设备</b>、<b>新增扫描任务</b>和<b>其他发现</b>，勾选确认后才添加。</div>
+          <label class="f"><span>要求（可空）</span><input type="text" name="hint" placeholder="如：重点找二楼的摄像头和打印机；看看有没有私接的路由器"></label>
+          <div class="row2">
+            <label class="f"><span>指定网段（可空，留空由 AI 决定）</span><input type="text" name="subnets" class="mono" placeholder="192.168.2.0/24, 192.168.3.0/24"></label>
+            <label class="f"><span>探测范围</span><select name="budget">
+              <option value="4">小：最多约 4 个 /24</option><option value="8" selected>中：最多约 8 个 /24</option><option value="16">大：最多约 16 个 /24</option></select></label>
+          </div>
+          <div class="btns"><button class="btn accent" type="submit">开始自主发现</button><button class="btn hidden" type="button" id="dAiLast">查看上次结果</button></div>
+          <div class="help">只探测私有地址和已配置的网段；探测过程不修改任何配置。需要先在「AI 诊断」页设置模型，通常需要 1~5 分钟。</div>
+        </form></div></div>
         <div class="panel"><div class="ph">自动扫描任务<span class="r" style="display:flex;gap:10px;align-items:center">
           <label class="checks" title="关闭后所有任务都不再定时运行，仍可手动扫描"><input type="checkbox" id="dMaster"> 自动扫描</label></span></div>
           <div class="pb">
@@ -2561,9 +2607,185 @@
         await loadTopology(); await load(true);
       } catch (e) { toast(errMsg(e), true); }
     });
+    // ---- AI 自主发现 ----
+    let aid = null; // { el, busy, onKey }
+    const AID_KEY = 'np_aidisc';
+    const confTxt = { high: ['ok', '把握高'], medium: ['slow', '把握中'], low: ['unknown', '把握低'] };
+    function closeAid() {
+      if (!aid) return;
+      if (aid.busy) aid.busy.abort();
+      aid.el.remove();
+      document.removeEventListener('keydown', aid.onKey, true);
+      aid = null;
+    }
+    function openAid() {
+      if (aid) return;
+      const el = document.createElement('div');
+      el.className = 'modal-mask';
+      el.innerHTML = `<div class="modal aiopt"><div class="mh"><b>✦ AI 自主发现</b><span class="muted" id="aidMeta"></span>
+        <button class="btn small r" id="aidClose">关闭</button></div><div class="mb" id="aidBody"></div><div class="mf" id="aidFoot"></div></div>`;
+      document.body.appendChild(el);
+      el.addEventListener('mousedown', ev => { if (ev.target === el && !(aid && aid.busy)) closeAid(); });
+      const onKey = ev => { if (ev.key === 'Escape') { ev.stopPropagation(); closeAid(); } };
+      document.addEventListener('keydown', onKey, true);
+      aid = { el, onKey };
+      $('#aidClose').onclick = closeAid;
+    }
+    function lastAid() { try { return JSON.parse(sessionStorage.getItem(AID_KEY) || 'null'); } catch (e) { return null; } }
+    function syncLastBtn() { $('#dAiLast').classList.toggle('hidden', !lastAid()); }
+    async function runAid(req) {
+      openAid();
+      const body = $('#aidBody'), foot = $('#aidFoot');
+      const st = { status: '正在连接…', tools: [], text: '', error: '' };
+      const draw = () => {
+        if (!aid) return;
+        const pre = st.text.split('```')[0].trim();
+        body.innerHTML = `${req.hint || (req.subnets || []).length ? `<div class="help" style="margin-top:0">${req.hint ? '要求：' + esc(req.hint) : ''}
+            ${(req.subnets || []).length ? ' 指定网段：<span class="mono">' + esc(req.subnets.join('、')) + '</span>' : ''}</div>` : ''}
+          ${st.tools.length ? `<div class="ai-tools">${st.tools.map(t => `<span class="ai-tool" title="${esc(t.args || '')}">${esc(t.title || t.name)}${t.short ? ' · ' + esc(t.short) : ''}</span>`).join('')}</div>` : ''}
+          ${pre ? `<div class="ai-md">${mdLite(pre)}</div>` : ''}
+          ${st.text.includes('```') && !st.error ? '<div class="ai-status"><span class="ai-spin"></span>正在生成发现清单…</div>' : ''}
+          ${st.status ? `<div class="ai-status"><span class="ai-spin"></span>${esc(st.status)}</div>` : ''}
+          ${st.error ? `<div class="ai-err">${esc(st.error)}</div>` : ''}`;
+      };
+      foot.innerHTML = `<button class="btn" id="aidStop">停止</button>`;
+      $('#aidMeta').textContent = '';
+      draw();
+      const ctl = new AbortController();
+      aid.busy = ctl;
+      $('#aidStop').onclick = () => ctl.abort();
+      let result = null, meta = '';
+      // 工具参数里的网段 / 地址，显示在进度标签上
+      const shortArgs = a => { try { const o = JSON.parse(a || '{}'); return [].concat(o.subnets || [], o.ips || [], o.ip || [], o.mac || [], o.switch || []).join(' ').slice(0, 60); } catch (e) { return ''; } };
+      try {
+        await streamNDJSON('api/ai/discover', req, ctl.signal, ev => {
+          if (ev.t === 'status') st.status = ev.text;
+          else if (ev.t === 'stats') st.status = `已汇总网络线索：${ev.stats.candidates} 个候选网段，已登记 ${ev.stats.nodes} 个节点、${ev.stats.switches} 台交换机，正在请求模型…`;
+          else if (ev.t === 'delta') { st.text += ev.text; st.status = ''; }
+          else if (ev.t === 'break') st.text = '';
+          else if (ev.t === 'tool') {
+            ev.short = shortArgs(ev.args);
+            st.tools.push(ev);
+            st.status = (ev.name === 'probe_subnet' ? '正在探测网段 ' : ev.name === 'fingerprint_host' ? '正在识别设备 ' : '正在查询 ' + (ev.title || ev.name) + ' ') + (ev.short || '') + '…';
+          }
+          else if (ev.t === 'error') { st.error = ev.error; st.status = ''; }
+          else if (ev.t === 'result') result = ev.result;
+          else if (ev.t === 'done') meta = `${ev.model} · ${(ev.ms / 1000).toFixed(1)} 秒 · 工具 ${ev.tools} 次 · ${(ev.usage || {}).total_tokens || 0} tokens`;
+          draw();
+        });
+        if (!result && !st.error) st.error = '模型没有返回结果，请重试。';
+      } catch (e) {
+        st.error = e.name === 'AbortError' ? '已停止' : errMsg(e);
+      } finally {
+        if (aid) aid.busy = null;
+      }
+      if (!aid) return;
+      if (result) {
+        result.meta = meta;
+        result.req = req;
+        sessionStorage.setItem(AID_KEY, JSON.stringify(result));
+        syncLastBtn();
+        drawAid(result);
+        load(true);
+      } else {
+        st.status = '';
+        draw();
+        foot.innerHTML = `<button class="btn primary" id="aidRetry">重试</button>`;
+        $('#aidRetry').onclick = () => runAid(req);
+      }
+    }
+    function drawAid(res) {
+      openAid();
+      const body = $('#aidBody'), foot = $('#aidFoot');
+      $('#aidMeta').textContent = `  ${res.time || ''}${res.meta ? ' · ' + res.meta : ''}`;
+      const devs = res.devices || [], jobs = res.scan_jobs || [], notes = res.notes || [], dropped = res.dropped || [];
+      const swName = id => { const w = S.topo && S.topo.switches.find(x => x.id === id); return w ? (w.name || w.id) : id; };
+      const cats = res.categories || [];
+      body.innerHTML = `
+        ${res.summary ? `<div class="ai-md">${mdLite(res.summary)}</div>` : ''}
+        <div class="opt-sec"><h4>1 · 新增设备 <span class="muted">${devs.length} 台 · 名称和类别可修改</span>
+          ${devs.length ? '<label class="r"><input type="checkbox" id="aidAllD" checked> 全选</label>' : ''}</h4>
+          ${devs.length ? `<div style="overflow:auto"><table class="grid flat opt-tbl"><thead><tr><th></th><th>地址</th><th>名称 / 类别</th><th>依据</th><th>接线</th><th>告警</th></tr></thead><tbody>${devs.map((d, i) => `<tr>
+            <td style="width:24px"><input type="checkbox" class="aidD" data-i="${i}" checked></td>
+            <td class="mono" style="white-space:nowrap">${esc(d.ip)}<div class="muted">${esc(d.mac || '无 MAC')}</div></td>
+            <td style="min-width:180px"><input type="text" class="aidN" data-i="${i}" value="${esc(d.name || '')}" style="margin-bottom:4px">
+              ${d.kind === 'switch' ? '<span class="badge solid">交换机</span>' : `<select class="aidC" data-i="${i}"><option value="">（不分类）</option>${cats.map(c => `<option ${c === d.category ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>`}</td>
+            <td class="wrap"><span class="badge ${(confTxt[d.confidence] || confTxt.medium)[0]}">${(confTxt[d.confidence] || confTxt.medium)[1]}</span>
+              ${esc([d.vendor, d.hostname].filter(Boolean).join(' · '))}<div class="muted">${esc(d.evidence || '')}</div>
+              ${d.model ? `<div class="muted mono" style="font-size:11px">${esc(d.model)}</div>` : ''}</td>
+            <td style="white-space:nowrap">${d.switch ? esc(d.attach || swName(d.switch) + ' 口 ' + d.port) : '<span class="muted">未定位</span>'}</td>
+            <td><input type="checkbox" class="aidA" data-i="${i}" ${d.alert ? 'checked' : ''} title="推送企业微信告警"></td></tr>`).join('')}</tbody></table></div>`
+            : '<div class="help">没有发现需要添加的新设备。</div>'}
+          ${dropped.length ? `<details class="help"><summary>已忽略 ${dropped.length} 条不可信或重复的建议</summary>${dropped.map(x => `<div><span class="mono">${esc(x.ip)}</span> ${esc(x.reason)}</div>`).join('')}</details>` : ''}
+        </div>
+        <div class="opt-sec"><h4>2 · 新增扫描任务 <span class="muted">${jobs.length} 个 · 之后定时扫描、自动跟踪 IP 变化</span></h4>
+          ${jobs.length ? jobs.map((j, i) => `<label class="opt-chk" style="display:block"><input type="checkbox" class="aidJ" data-i="${i}" checked>
+            <b>${esc(j.name)}</b> <span class="mono">${esc(j.subnets.join('、'))}</span> <span class="muted">每 ${j.interval_min} 分钟 · ${j.auto_add ? '自动添加新设备' : '只列出新设备'}</span>
+            <div class="muted">${esc(j.reason || '')}</div></label>`).join('') : '<div class="help">现有扫描任务已覆盖发现的网段。</div>'}
+        </div>
+        <div class="opt-sec"><h4>3 · 其他发现 <span class="muted">${notes.length} 条</span></h4>
+          ${notes.length ? `<ul style="margin:0;padding-left:20px;line-height:1.8">${notes.map(n => `<li>${esc(n)}</li>`).join('')}</ul>` : '<div class="help">无。</div>'}
+        </div>`;
+      const count = () => $$('.aidD:checked', body).length + $$('.aidJ:checked', body).length;
+      const upd = () => {
+        const b = $('#aidApply'), n = count();
+        if (b) { b.disabled = !n; b.textContent = `添加所选（${n}）`; }
+        const all = $('#aidAllD');
+        if (all) { const xs = $$('.aidD', body); all.checked = xs.length > 0 && xs.every(x => x.checked); }
+      };
+      foot.innerHTML = `<button class="btn primary" id="aidApply">添加所选</button><button class="btn" id="aidRerun">重新发现</button>
+        <span class="muted" style="margin-left:auto">添加后可在提示中撤销</span>`;
+      $$('.aidD, .aidJ', body).forEach(x => x.onchange = upd);
+      const allD = $('#aidAllD');
+      if (allD) allD.onchange = () => { $$('.aidD', body).forEach(x => { x.checked = allD.checked; }); upd(); };
+      $('#aidRerun').onclick = () => runAid(res.req || {});
+      $('#aidApply').onclick = async () => {
+        const pick = $$('.aidD:checked', body).map(x => {
+          const i = +x.dataset.i, c = $(`.aidC[data-i="${i}"]`, body);
+          return Object.assign({}, devs[i], { name: $(`.aidN[data-i="${i}"]`, body).value.trim(), category: c ? c.value : '', alert: $(`.aidA[data-i="${i}"]`, body).checked });
+        });
+        const pickJ = $$('.aidJ:checked', body).map(x => jobs[+x.dataset.i]);
+        try {
+          const r = await api('POST', 'api/ai/discover/apply', { devices: pick, scan_jobs: pickJ });
+          const doneIP = new Set(pick.map(d => d.ip));
+          res.devices = devs.filter(d => !doneIP.has(d.ip));
+          res.scan_jobs = jobs.filter(j => !pickJ.includes(j));
+          sessionStorage.setItem(AID_KEY, JSON.stringify(res));
+          await loadTopology(); await loadCfg(); await load(true);
+          if (aid) drawAid(res);
+          const parts = [];
+          if (r.nodes) parts.push(`${r.nodes} 台设备${r.located ? `（${r.located} 台已定位到端口）` : '（未定位）'}`);
+          if (r.switches) parts.push(`${r.switches} 台交换机`);
+          if (r.jobs) parts.push(`${r.jobs} 个扫描任务${r.discovery_enabled ? '' : '（自动扫描总开关未开）'}`);
+          const sk = (r.skipped || []).length;
+          const u = r.undo || {};
+          toast(`已添加 ${parts.join('、') || '0 项'}${sk ? `，${sk} 条已失效被跳过` : ''}`, false,
+            (u.nodes || []).length + (u.switches || []).length + (u.jobs || []).length ? {
+              label: '撤销', fn: async () => {
+                try {
+                  await api('POST', 'api/ai/discover/apply', { undo: u });
+                  const cur = lastAid(); // 撤销的建议放回清单
+                  if (cur) { cur.devices = pick.concat(cur.devices || []); cur.scan_jobs = pickJ.concat(cur.scan_jobs || []); sessionStorage.setItem(AID_KEY, JSON.stringify(cur)); }
+                  await loadTopology(); await loadCfg(); await load(true);
+                  toast('已撤销本次添加（可点「查看上次结果」重新选择）');
+                } catch (e) { toast(errMsg(e), true); }
+              },
+            } : null);
+        } catch (e) { toast(errMsg(e), true); }
+      };
+      upd();
+    }
+    $('#dAi').onsubmit = ev => {
+      ev.preventDefault();
+      const e = ev.target.elements;
+      runAid({ hint: e.hint.value.trim(), subnets: split(e.subnets.value), budget: +e.budget.value });
+    };
+    $('#dAiLast').onclick = () => { const r = lastAid(); if (r) drawAid(r); };
+    syncLastBtn();
+
     loadCfg().catch(e => toast(errMsg(e), true));
     load();
-    return { destroy() { clearTimeout(timer); } };
+    return { destroy() { clearTimeout(timer); closeAid(); } };
   }
 
   // ---------------------------------------------------------------------------
