@@ -36,10 +36,11 @@ type MonitorSpec struct {
 // IsEnabled 未设置时默认启用。
 func (m MonitorSpec) IsEnabled() bool { return m.Enabled == nil || *m.Enabled }
 
-// Switch 交换机。
+// Switch 带端口的网络设备：交换机，以及路由器、防火墙、光猫、无线 AP 等（由 Type 区分）。
 type Switch struct {
 	ID          string   `yaml:"id" json:"id"`
 	Name        string   `yaml:"name" json:"name"`
+	Type        string   `yaml:"type,omitempty" json:"type"` // 设备类型，空表示交换机
 	Role        string   `yaml:"role" json:"role"`
 	Layer       string   `yaml:"layer,omitempty" json:"layer"`
 	Vendor      string   `yaml:"vendor,omitempty" json:"vendor"`
@@ -126,11 +127,35 @@ type Topology struct {
 
 // 已知的取值，用于校验和网页下拉框。
 var (
-	Roles      = []string{"core", "aggregation", "access", "other"}
-	NodeSides  = []string{"left", "right"}
-	KnownFlags = []string{"gateway", "suspect", "unlocated", "arp_only", "jump_host", "no_ipv4", "critical", "discovered"}
-	IPModes    = []string{"", "dhcp", "static"}
+	// DeviceTypes 网络设备类型（switches[].type），空值等同 switch。
+	DeviceTypes = []string{"switch", "router", "firewall", "gateway", "modem", "ap", "ac", "lb", "other"}
+	Roles       = []string{"core", "aggregation", "access", "other"}
+	NodeSides   = []string{"left", "right"}
+	KnownFlags  = []string{"gateway", "suspect", "unlocated", "arp_only", "jump_host", "no_ipv4", "critical", "discovered"}
+	IPModes     = []string{"", "dhcp", "static"}
 )
+
+// DeviceTypeNames 设备类型的中文名。
+var DeviceTypeNames = map[string]string{
+	"switch": "交换机", "router": "路由器", "firewall": "防火墙", "gateway": "上网行为管理",
+	"modem": "光猫", "ap": "无线AP", "ac": "无线控制器", "lb": "负载均衡", "other": "网络设备",
+}
+
+// DeviceType 设备类型，空值视为交换机。
+func (s *Switch) DeviceType() string {
+	if s.Type == "" {
+		return "switch"
+	}
+	return s.Type
+}
+
+// TypeName 设备类型的中文名，如“防火墙”。
+func (s *Switch) TypeName() string {
+	if n, ok := DeviceTypeNames[s.DeviceType()]; ok {
+		return n
+	}
+	return s.DeviceType()
+}
 
 var idRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
 
@@ -251,6 +276,10 @@ func (t *Topology) Normalize() {
 		s.ID = strings.TrimSpace(s.ID)
 		s.IP = strings.TrimSpace(s.IP)
 		s.MAC = strings.ToUpper(strings.TrimSpace(s.MAC))
+		s.Type = strings.ToLower(strings.TrimSpace(s.Type))
+		if s.Type == "switch" {
+			s.Type = "" // 默认值不写入文件
+		}
 		if s.ID == "" {
 			s.ID = t.NewSwitchID(s)
 		}
@@ -336,6 +365,9 @@ func (t *Topology) Validate() []string {
 				add("IP %s 同时出现在 %s 和 %s", s.IP, prev, s.ID)
 			}
 			ips[s.IP] = s.ID
+		}
+		if s.Type != "" && !contains(DeviceTypes, s.Type) {
+			add("交换机 %s: type 必须是 %s 之一（留空为交换机）", s.ID, strings.Join(DeviceTypes, "/"))
 		}
 		if !contains(Roles, s.Role) {
 			add("交换机 %s: role 必须是 %s 之一", s.ID, strings.Join(Roles, "/"))

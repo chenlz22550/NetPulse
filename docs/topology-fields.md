@@ -11,7 +11,7 @@
 ```yaml
 version: 1          # 固定为 1
 site: {...}         # 机房信息
-switches: [...]     # 交换机
+switches: [...]     # 网络设备（交换机、路由器、防火墙、光猫、AP 等）
 links: [...]        # 交换机之间的连线
 nodes: [...]        # 终端节点
 ```
@@ -43,6 +43,7 @@ nodes: [...]        # 终端节点
 |---|---|---|---|
 | id | id | 自动 | 被 `links`、`nodes[].attach.switch` 引用 |
 | name | 字符串 | | 显示名（必填） |
+| type | 枚举 | switch | 设备类型：`switch` 交换机 / `router` 路由器 / `firewall` 防火墙 / `gateway` 上网行为管理 / `modem` 光猫 / `ap` 无线AP / `ac` 无线控制器 / `lb` 负载均衡 / `other`；留空为交换机。各类型都能接终端、互相连线，拓扑图左上角图标和色条区分类型 |
 | role | 枚举 | access | `core` 核心 / `aggregation` 汇聚 / `access` 接入 / `other`；核心与汇聚画成黑色实心 |
 | layer | 字符串 | | `L2`、`L3` 等，仅展示 |
 | vendor / model | 字符串 | | 厂商 / 型号 |
@@ -124,6 +125,16 @@ site:
   subnet: 10.20.0.0/24
   gateway: 10.20.0.1
 switches:
+  - id: ont
+    name: 电信光猫
+    type: modem
+    ports: [PON, LAN1, LAN2, LAN3, LAN4]
+  - id: fw
+    name: 出口防火墙
+    type: firewall
+    role: core
+    ip: 10.20.0.254
+    ports: [WAN1, WAN2, LAN1, LAN2, LAN3, LAN4]
   - id: core
     name: H3C 核心
     role: core
@@ -138,6 +149,10 @@ switches:
     ip: 10.20.0.3
     location: A01 机柜 U42
 links:
+  - from: {switch: ont, port: LAN1}
+    to: {switch: fw, port: WAN1}
+  - from: {switch: fw, port: LAN1}
+    to: {switch: core, port: GE1/0/2}
   - from: {switch: core, port: GE1/0/48}
     to: {switch: acc-a01, port: "48"}
 nodes:

@@ -63,7 +63,7 @@ func discSystemPrompt(site string, budget int) string {
  "notes":["192.168.1.50 是已登记设备 n-xxx 换了 IP，下次扫描会自动更新"]}
 规则：
 - devices 只能包含本次 probe_subnet / fingerprint_host 实际看到、status 为 new 的地址；最多 ` + fmt.Sprint(discMaxDevices) + ` 台；不要编造 IP、MAC。
-- kind：node（终端）或 switch（网管型交换机）。category（仅 node）只能是：` + strings.Join(deviceCategories, "、") + `，证据不足留空。
+- kind：node（终端）或 switch（带端口的网络设备）。kind=switch 时 type 写设备类型：switch 交换机、router 路由器、firewall 防火墙、gateway 上网行为管理、modem 光猫、ap 无线AP、ac 无线控制器、lb 负载均衡、other；只在证据明确（SNMP 描述、网页标题、型号）时把防火墙/路由器/光猫/AP 写成 switch，否则按 node 并给 category。category（仅 node）只能是：` + strings.Join(deviceCategories, "、") + `，证据不足留空。
 - name：简短中文名，必须有依据（如“3 号摄像头 海康”“财务部打印机”），没有依据就用“厂商 + 类别”，不要留空。
 - alert：服务器、存储、录像机、网关、防火墙、交换机、门禁等关键设备为 true；手机平板、笔记本、台式机为 false。
 - switch/port：只有 locate_device 实际查到时才填（switch 为拓扑中的交换机 id）。
@@ -78,6 +78,7 @@ func discSystemPrompt(site string, budget int) string {
 type discDevice struct {
 	IP         string `json:"ip"`
 	Kind       string `json:"kind"`
+	Type       string `json:"type,omitempty"` // kind=switch 时的设备类型
 	Name       string `json:"name"`
 	Category   string `json:"category,omitempty"`
 	Alert      bool   `json:"alert"`
@@ -151,6 +152,13 @@ func (s *Server) checkDiscDevice(t *topology.Topology, d *discDevice) string {
 	}
 	if d.Kind != "switch" {
 		d.Kind = "node"
+	}
+	d.Type = strings.ToLower(strings.TrimSpace(d.Type))
+	if d.Kind != "switch" || !inList(topology.DeviceTypes, d.Type) {
+		d.Type = ""
+	}
+	if d.Type == "switch" {
+		d.Type = ""
 	}
 	d.Category = strings.TrimSpace(d.Category)
 	if d.Kind == "switch" || !isCategory(d.Category) {
@@ -427,7 +435,7 @@ func (s *Server) handleAIDiscoverApply(w http.ResponseWriter, r *http.Request) e
 					note += "：" + d.Evidence
 				}
 				if d.Kind == "switch" {
-					sw := &topology.Switch{Name: d.Name, Role: "access", IP: d.IP, MAC: d.MAC, Vendor: d.Vendor,
+					sw := &topology.Switch{Name: d.Name, Type: d.Type, Role: "access", IP: d.IP, MAC: d.MAC, Vendor: d.Vendor,
 						Model: truncPlain(d.Model, 60), Note: note}
 					sw.Monitor.Alert = d.Alert
 					sw.ID = t.NewSwitchID(sw)

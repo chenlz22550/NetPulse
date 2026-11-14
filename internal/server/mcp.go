@@ -515,7 +515,7 @@ func buildRows(t *topology.Topology, sts map[string]monitor.Status) []deviceRow 
 		}
 	}
 	for _, s := range t.Switches {
-		r := deviceRow{ID: s.ID, Kind: "switch", IP: s.IP, Name: s.Name, Vendor: s.Vendor, MAC: s.MAC, Attach: "交换机（" + s.Role + "）", Location: s.Location, Alert: s.Monitor.Alert}
+		r := deviceRow{ID: s.ID, Kind: "switch", IP: s.IP, Name: s.Name, Vendor: s.Vendor, MAC: s.MAC, Attach: s.TypeName() + "（" + s.Role + "）", Location: s.Location, Alert: s.Monitor.Alert}
 		fill(&r, s.IP != "" && s.Monitor.IsEnabled())
 		rows = append(rows, r)
 	}
@@ -703,11 +703,12 @@ func init() {
 			Run:         toolDeleteDevice,
 		},
 		{
-			Name: "upsert_switch", Title: "新增或修改交换机", Write: true,
-			Description: "新增或修改交换机。用 id 定位已有交换机时只修改提供的字段；找不到时新建（新建必须提供 name）。ports 可用于端口下拉和排序。",
+			Name: "upsert_switch", Title: "新增或修改网络设备（交换机/路由器/防火墙/光猫/AP 等）", Write: true,
+			Description: "新增或修改带端口、可与其他设备连线的网络设备：交换机、路由器、防火墙、上网行为管理、光猫、无线 AP、无线控制器、负载均衡（用 type 区分，省略为交换机）。用 id 定位已有设备时只修改提供的字段；找不到时新建（新建必须提供 name）。ports 可用于端口下拉和排序。",
 			Schema: obj(map[string]interface{}{
-				"id":       str("交换机 id；新建时可省略"),
+				"id":       str("设备 id；新建时可省略"),
 				"name":     str("显示名"),
+				"type":     enum("设备类型：switch 交换机 / router 路由器 / firewall 防火墙 / gateway 上网行为管理 / modem 光猫 / ap 无线AP / ac 无线控制器 / lb 负载均衡 / other 其他网络设备", topology.DeviceTypes...),
 				"role":     enum("角色", topology.Roles...),
 				"layer":    str("L2 / L3"),
 				"vendor":   str("厂商"),
