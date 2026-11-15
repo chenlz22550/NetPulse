@@ -240,9 +240,22 @@ func (s *Server) mcpDispatch(m rpcMsg, remote string) (interface{}, *rpcError) {
 			Name      string                     `json:"name"`
 			Arguments map[string]json.RawMessage `json:"arguments"`
 		}
-		if err := json.Unmarshal(m.Params, &p); err != nil {
-			return nil, &rpcError{Code: -32602, Message: "参数无效: " + err.Error()}
+		entry := MCPCallLog{RPCID: rpcIDText(m.ID), Source: "mcp", Remote: remote, Args: rawArgsText(m.Params), StartedAt: time.Now().UnixMilli()}
+		// logReturn 把返回给客户端的完整内容（成功结果、isError 结果或 JSON-RPC 错误）记入日志。
+		logReturn := func(status, errMsg string, payload interface{}) {
+			entry.Status, entry.Error = status, errMsg
+			if b, err := json.MarshalIndent(payload, "", "  "); err == nil {
+				entry.Result = string(b)
+			}
+			s.recordToolCall(entry)
 		}
+		if err := json.Unmarshal(m.Params, &p); err != nil {
+			entry.Tool = toolNameOf(m.Params)
+			rerr := &rpcError{Code: -32602, Message: "参数无效: " + err.Error()}
+			logReturn("error", rerr.Message, map[string]interface{}{"error": rerr})
+			return nil, rerr
+		}
+		entry.Tool = p.Name
 		var tool *mcpTool
 		for _, t := range s.visibleTools() {
 			if t.Name == p.Name {
@@ -250,19 +263,31 @@ func (s *Server) mcpDispatch(m rpcMsg, remote string) (interface{}, *rpcError) {
 			}
 		}
 		if tool == nil {
-			if s.lookupTool(p.Name) != nil {
-				return toolError("MCP 当前为只读模式，不能调用 " + p.Name + "（可在网页「MCP」页关闭只读）"), nil
+			if t := s.lookupTool(p.Name); t != nil {
+				entry.Title = t.Title
+				res := toolError("MCP 当前为只读模式，不能调用 " + p.Name + "（可在网页「MCP」页关闭只读）")
+				logReturn("denied", "MCP 当前为只读模式", res)
+				return res, nil
 			}
-			return nil, &rpcError{Code: -32602, Message: "未知工具: " + p.Name}
+			rerr := &rpcError{Code: -32602, Message: "未知工具: " + p.Name}
+			logReturn("denied", "未知工具", map[string]interface{}{"error": rerr})
+			return nil, rerr
 		}
+		entry.Title = tool.Title
 		if p.Arguments == nil {
 			p.Arguments = map[string]json.RawMessage{}
 		}
+		start := time.Now()
 		res, err := tool.Run(s, p.Arguments, remote)
+		entry.DurationMs = time.Since(start).Milliseconds()
 		if err != nil {
-			return toolError(errText(err)), nil
+			out := toolError(errText(err))
+			logReturn("error", errText(err), out)
+			return out, nil
 		}
 		text, _ := json.MarshalIndent(res, "", "  ")
+		entry.Status, entry.Result = "ok", string(text)
+		s.recordToolCall(entry)
 		return map[string]interface{}{
 			"content": []map[string]interface{}{{"type": "text", "text": string(text)}},
 			"isError": false,
@@ -326,6 +351,45 @@ func (s *Server) mcpDispatch(m rpcMsg, remote string) (interface{}, *rpcError) {
 		return nil, nil
 	}
 	return nil, &rpcError{Code: -32601, Message: "不支持的方法: " + m.Method}
+}
+
+// rpcIDText 把 JSON-RPC id 转成便于搜索的文本（字符串 id 去掉引号）。
+func rpcIDText(id json.RawMessage) string {
+	var str string
+	if json.Unmarshal(id, &str) == nil {
+		return str
+	}
+	return string(id)
+}
+
+// rawArgsText 取出 tools/call 中原样的 arguments（完整保存，脱敏在写日志时进行）。
+func rawArgsText(params json.RawMessage) string {
+	var p struct {
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	if json.Unmarshal(params, &p) != nil {
+		// params 本身不是对象：原样记录，便于排查。
+		return string(params)
+	}
+	if len(p.Arguments) == 0 || string(p.Arguments) == "null" {
+		return "{}"
+	}
+	return string(p.Arguments)
+}
+
+// toolNameOf 在 params 无法按规范解码时尽量取出工具名。
+func toolNameOf(params json.RawMessage) string {
+	var p struct {
+		Name json.RawMessage `json:"name"`
+	}
+	if json.Unmarshal(params, &p) != nil || len(p.Name) == 0 {
+		return ""
+	}
+	var name string
+	if json.Unmarshal(p.Name, &name) == nil {
+		return name
+	}
+	return string(p.Name)
 }
 
 func toolError(msg string) map[string]interface{} {

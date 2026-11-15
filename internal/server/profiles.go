@@ -2,9 +2,13 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"netping/internal/config"
@@ -86,6 +90,10 @@ func mapProfileErr(err error) error {
 	if err == nil {
 		return nil
 	}
+	var ie *profiles.ImportError
+	if errors.As(err, &ie) {
+		return &apiError{status: http.StatusBadRequest, code: "invalid_import", msg: ie.Msg, problems: ie.Problems}
+	}
 	switch {
 	case errors.Is(err, profiles.ErrNotFound), errors.Is(err, profiles.ErrVersionNotFound):
 		return &apiError{status: http.StatusNotFound, msg: err.Error()}
@@ -129,6 +137,13 @@ func (s *Server) handleProfiles(w http.ResponseWriter, r *http.Request, arg stri
 		default:
 			return &apiError{status: http.StatusMethodNotAllowed, msg: "不支持的请求方法"}
 		}
+	}
+
+	if arg == "import" {
+		if r.Method != http.MethodPost {
+			return &apiError{status: http.StatusMethodNotAllowed, msg: "不支持的请求方法"}
+		}
+		return s.importProfile(w, r, "")
 	}
 
 	parts := strings.Split(arg, "/")
@@ -185,6 +200,12 @@ func (s *Server) handleProfiles(w http.ResponseWriter, r *http.Request, arg stri
 		}
 		writeJSON(w, res)
 		return nil
+
+	case len(parts) == 2 && sub == "export" && r.Method == http.MethodGet:
+		return s.exportProfile(w, r, id)
+
+	case len(parts) == 2 && sub == "import" && r.Method == http.MethodPost:
+		return s.importProfile(w, r, id)
 
 	case len(parts) == 2 && sub == "settings":
 		switch r.Method {
@@ -297,5 +318,74 @@ func (s *Server) rollbackProfileVersion(w http.ResponseWriter, id, verID string)
 		"backup_version":   backup.ID,
 		"active_profile":   s.activeProfileID(),
 	})
+	return nil
+}
+
+// exportProfile GET /api/profiles/<id>/export[?secrets=include] 下载单个机房的配置文件。
+func (s *Server) exportProfile(w http.ResponseWriter, r *http.Request, id string) error {
+	include := r.URL.Query().Get("secrets") == "include"
+	exp, err := s.Profiles.Export(id, include, Version)
+	if err != nil {
+		return mapProfileErr(err)
+	}
+	data, err := json.MarshalIndent(exp, "", "  ")
+	if err != nil {
+		return err
+	}
+	name := safeFileName(exp.Source.ProfileName)
+	if name == "" {
+		name = id
+	}
+	fname := "netpulse-room-" + name + "-" + exp.ExportedAt.Format("20060102-150405") + ".json"
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"room-%s.json\"; filename*=UTF-8''%s", id, url.PathEscape(fname)))
+	log.Printf("导出机房配置 %s（%s，凭据%s）", id, clientAddr(r), map[bool]string{true: "含明文", false: "已脱敏"}[include])
+	_, err = w.Write(append(data, '\n'))
+	return err
+}
+
+func safeFileName(s string) string {
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(s) {
+		switch {
+		case r < 32, strings.ContainsRune(`\/:*?"<>|`, r):
+			b.WriteRune('_')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// importProfile POST /api/profiles/<id>/import 覆盖指定机房；POST /api/profiles/import 导入为新机房。
+// ?dry_run=1 只校验并返回覆盖说明，不做任何修改。请求体为导出文件原文。
+func (s *Server) importProfile(w http.ResponseWriter, r *http.Request, id string) error {
+	raw, err := io.ReadAll(io.LimitReader(r.Body, profiles.MaxImportBytes+1))
+	if err != nil {
+		return err
+	}
+	q := r.URL.Query()
+	dry := q.Get("dry_run") == "1" || q.Get("dry_run") == "true"
+	var p *profiles.ImportPreview
+	switch {
+	case id == "" && dry:
+		p, err = s.Profiles.PreviewImportAsNew(q.Get("name"), raw)
+	case id == "":
+		p, err = s.Profiles.ImportAsNew(q.Get("name"), raw)
+	case dry:
+		p, err = s.Profiles.PreviewImport(id, raw)
+	default:
+		p, err = s.Profiles.Import(id, raw)
+	}
+	if err != nil {
+		return mapProfileErr(err)
+	}
+	if dry {
+		writeJSON(w, map[string]interface{}{"ok": true, "dry_run": true, "preview": p})
+		return nil
+	}
+	log.Printf("导入机房配置到 %s「%s」（%s，来源「%s」，备份 %s）", p.TargetID, p.TargetName, clientAddr(r), p.SourceName, p.BackupVersion)
+	s.okRev(w, map[string]interface{}{"id": p.TargetID, "preview": p, "backup_version": p.BackupVersion, "active_profile": s.activeProfileID()})
 	return nil
 }

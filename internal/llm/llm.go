@@ -106,6 +106,14 @@ type Request struct {
 	Messages  []Message
 	Tools     []Tool
 	MaxTokens int
+	// OnReasoning 可选：模型服务在流中返回的思考内容/思考摘要增量（仅在所选协议与模型提供时回调）。
+	OnReasoning func(string)
+}
+
+func (r Request) reasoningDelta(d string) {
+	if d != "" && r.OnReasoning != nil {
+		r.OnReasoning(d)
+	}
 }
 
 func (c *Client) httpClient() (*http.Client, error) {
@@ -148,6 +156,12 @@ func (e *APIError) Error() string {
 		msg = hint + "（" + msg + "）"
 	}
 	return fmt.Sprintf("模型接口返回 HTTP %d：%s", e.Status, msg)
+}
+
+// summaryUnsupported 判断 400 错误是否由思考摘要参数（reasoning.summary）引起。
+func summaryUnsupported(msg string) bool {
+	m := strings.ToLower(msg)
+	return strings.Contains(m, "summary") || strings.Contains(m, "verif") || strings.Contains(m, "organization") || strings.Contains(m, "reasoning")
 }
 
 // Stream 发送流式请求：正文增量通过 onDelta 回调，返回完整的助手消息（含工具调用）与用量。
@@ -319,6 +333,7 @@ func (c *Client) streamOpenAI(ctx context.Context, req Request, onDelta func(str
 			d := ch.Delta
 			if d.ReasoningContent != "" {
 				reasoning.WriteString(d.ReasoningContent)
+				req.reasoningDelta(d.ReasoningContent)
 			}
 			if d.Content != "" {
 				content.WriteString(d.Content)
@@ -414,7 +429,7 @@ func (c *Client) streamOpenAIResponses(ctx context.Context, req Request, onDelta
 		body["instructions"] = strings.Join(sysParts, "\n\n")
 	}
 	if c.Thinking {
-		body["reasoning"] = map[string]string{"effort": "medium"}
+		body["reasoning"] = map[string]string{"effort": "medium", "summary": "auto"}
 	} else {
 		body["temperature"] = 0.3
 	}
@@ -438,9 +453,14 @@ func (c *Client) streamOpenAIResponses(ctx context.Context, req Request, onDelta
 		}
 		body["max_output_tokens"] = maxOut
 	}
-	resp, err := c.doStreamReq(ctx, http.MethodPost, joinEndpoint(c.BaseURL, "/responses"), map[string]string{
-		"Authorization": "Bearer " + c.APIKey,
-	}, body)
+	hdr := map[string]string{"Authorization": "Bearer " + c.APIKey}
+	resp, err := c.doStreamReq(ctx, http.MethodPost, joinEndpoint(c.BaseURL, "/responses"), hdr, body)
+	// 部分账号（未验证组织）或兼容网关不支持思考摘要：去掉 summary 后重试一次，保证原有功能可用。
+	var ae *APIError
+	if err != nil && c.Thinking && errors.As(err, &ae) && ae.Status == http.StatusBadRequest && summaryUnsupported(ae.Msg) {
+		body["reasoning"] = map[string]string{"effort": "medium"}
+		resp, err = c.doStreamReq(ctx, http.MethodPost, joinEndpoint(c.BaseURL, "/responses"), hdr, body)
+	}
 	if err != nil {
 		return Message{}, usage, err
 	}
@@ -565,6 +585,7 @@ func (c *Client) streamOpenAIResponses(ctx context.Context, req Request, onDelta
 		case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
 			if ev.Delta != "" {
 				reasoning.WriteString(ev.Delta)
+				req.reasoningDelta(ev.Delta)
 			}
 		case "response.output_item.added":
 			if ev.Item != nil && ev.Item.Type == "function_call" {
@@ -860,6 +881,7 @@ func (c *Client) streamAnthropic(ctx context.Context, req Request, onDelta func(
 			case "thinking_delta":
 				if ev.Delta.Thinking != "" {
 					reasoning.WriteString(ev.Delta.Thinking)
+					req.reasoningDelta(ev.Delta.Thinking)
 				}
 			case "input_json_delta":
 				if idx, ok := blockToCall[ev.Index]; ok {
@@ -967,7 +989,7 @@ func (c *Client) streamGemini(ctx context.Context, req Request, onDelta func(str
 
 	genCfg := map[string]interface{}{}
 	if c.Thinking {
-		genCfg["thinkingConfig"] = map[string]interface{}{"thinkingBudget": -1}
+		genCfg["thinkingConfig"] = map[string]interface{}{"thinkingBudget": -1, "includeThoughts": true}
 	} else {
 		genCfg["temperature"] = 0.3
 	}
@@ -1064,6 +1086,7 @@ func (c *Client) streamGemini(ctx context.Context, req Request, onDelta func(str
 				if p.Text != "" {
 					if p.Thought {
 						reasoning.WriteString(p.Text)
+						req.reasoningDelta(p.Text)
 					} else {
 						content.WriteString(p.Text)
 						if onDelta != nil {

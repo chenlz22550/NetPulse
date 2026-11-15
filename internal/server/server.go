@@ -59,6 +59,8 @@ type Server struct {
 	sshHostMu      sync.Mutex
 	seenMu         sync.Mutex
 	seen           map[string]seenHost // AI 自主发现 / MCP 探测中实际看到的地址（用于校验 AI 建议）
+	callLogOnce    sync.Once
+	callLog        *mcpLogger // MCP / AI 工具调用日志
 }
 
 // Start 开始监听，返回实际监听地址。
@@ -169,6 +171,9 @@ func writeErr(w http.ResponseWriter, err error) {
 		}
 		if ae.activeProfile != "" {
 			body["active_profile"] = ae.activeProfile
+		}
+		if len(ae.problems) > 0 {
+			body["problems"] = ae.problems
 		}
 	case errors.As(err, &ve):
 		status = http.StatusBadRequest
@@ -328,6 +333,8 @@ func (s *Server) routeAPI(w http.ResponseWriter, r *http.Request) {
 		err = s.handleDiscoveryApply(w, r)
 	case head == "plugins":
 		err = s.handlePlugins(w, r, arg)
+	case head == "mcp" && (arg == "calls" || strings.HasPrefix(arg, "calls/")):
+		err = s.handleMCPCalls(w, r, strings.TrimPrefix(strings.TrimPrefix(arg, "calls"), "/"))
 	case head == "mcp" && m == http.MethodGet:
 		s.handleMCPInfo(w)
 	case head == "alerting" && m == http.MethodPost:

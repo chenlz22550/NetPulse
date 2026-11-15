@@ -51,8 +51,12 @@ func TestStreamAssemblesResponse(t *testing.T) {
 			}))
 			defer ts.Close()
 			c := Client{BaseURL: ts.URL + "/v1", APIKey: "test-key", Model: "test-model", Thinking: thinking}
-			var deltas []string
-			msg, usage, err := c.Stream(context.Background(), Request{Messages: []Message{{Role: "user", Content: "诊断"}}, Tools: []Tool{{Type: "function", Function: ToolFunction{Name: "overview"}}}, MaxTokens: 100}, func(s string) { deltas = append(deltas, s) })
+			var deltas, thoughts []string
+			msg, usage, err := c.Stream(context.Background(), Request{Messages: []Message{{Role: "user", Content: "诊断"}}, Tools: []Tool{{Type: "function", Function: ToolFunction{Name: "overview"}}}, MaxTokens: 100,
+				OnReasoning: func(s string) { thoughts = append(thoughts, s) }}, func(s string) { deltas = append(deltas, s) })
+			if !reflect.DeepEqual(thoughts, []string{"检查链路"}) {
+				t.Fatalf("OnReasoning: %v", thoughts)
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -166,7 +170,7 @@ func TestStreamOpenAIResponses(t *testing.T) {
 		if body["model"] != "gpt-5" || body["instructions"] != "你是网络助手" || body["stream"] != true {
 			t.Fatalf("body: %v", body)
 		}
-		if body["reasoning"].(map[string]interface{})["effort"] != "medium" {
+		if body["reasoning"].(map[string]interface{})["effort"] != "medium" || body["reasoning"].(map[string]interface{})["summary"] != "auto" {
 			t.Fatalf("reasoning: %v", body["reasoning"])
 		}
 		input := body["input"].([]interface{})
@@ -192,7 +196,7 @@ func TestStreamOpenAIResponses(t *testing.T) {
 	defer ts.Close()
 
 	c := Client{Protocol: ProtocolOpenAIResponses, BaseURL: ts.URL + "/v1", APIKey: "resp-key", Model: "gpt-5", Thinking: true}
-	var deltas []string
+	var deltas, thoughts []string
 	var prevCall ToolCall
 	prevCall.ID = "call_prev"
 	prevCall.Type = "function"
@@ -205,9 +209,13 @@ func TestStreamOpenAIResponses(t *testing.T) {
 			{Role: "assistant", ToolCalls: []ToolCall{prevCall}},
 			{Role: "tool", ToolCallID: "call_prev", Content: `{"ok":true}`},
 		},
-		Tools:     []Tool{{Type: "function", Function: ToolFunction{Name: "ping_now"}}},
-		MaxTokens: 10,
+		Tools:       []Tool{{Type: "function", Function: ToolFunction{Name: "ping_now"}}},
+		MaxTokens:   10,
+		OnReasoning: func(s string) { thoughts = append(thoughts, s) },
 	}, func(s string) { deltas = append(deltas, s) })
+	if strings.Join(thoughts, "") != "先核实" {
+		t.Fatalf("OnReasoning: %v", thoughts)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,7 +267,7 @@ func TestStreamAnthropic(t *testing.T) {
 	defer ts.Close()
 
 	c := Client{Protocol: ProtocolAnthropic, BaseURL: ts.URL, APIKey: "ant-key", Model: "claude-sonnet-4-5", Thinking: true}
-	var deltas []string
+	var deltas, thoughts []string
 	var prevCall ToolCall
 	prevCall.ID = "toolu_0"
 	prevCall.Type = "function"
@@ -272,8 +280,12 @@ func TestStreamAnthropic(t *testing.T) {
 			{Role: "assistant", ToolCalls: []ToolCall{prevCall}},
 			{Role: "tool", ToolCallID: "toolu_0", Content: `{"ok":true}`},
 		},
-		Tools: []Tool{{Type: "function", Function: ToolFunction{Name: "get_overview"}}},
+		Tools:       []Tool{{Type: "function", Function: ToolFunction{Name: "get_overview"}}},
+		OnReasoning: func(s string) { thoughts = append(thoughts, s) },
 	}, func(s string) { deltas = append(deltas, s) })
+	if strings.Join(thoughts, "") != "分析中" {
+		t.Fatalf("OnReasoning: %v", thoughts)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,6 +312,9 @@ func TestStreamGemini(t *testing.T) {
 		if body["systemInstruction"] == nil || body["tools"] == nil {
 			t.Fatalf("body: %v", body)
 		}
+		if tc, _ := body["generationConfig"].(map[string]interface{})["thinkingConfig"].(map[string]interface{}); tc == nil || tc["includeThoughts"] != true {
+			t.Fatalf("thinkingConfig should request thought summaries: %v", body["generationConfig"])
+		}
 		contents := body["contents"].([]interface{})
 		if len(contents) != 3 || contents[1].(map[string]interface{})["role"] != "model" {
 			t.Fatalf("contents: %v", contents)
@@ -315,7 +330,7 @@ func TestStreamGemini(t *testing.T) {
 	defer ts.Close()
 
 	c := Client{Protocol: ProtocolGemini, BaseURL: ts.URL, APIKey: "gem-key", Model: "gemini-2.5-flash", Thinking: true}
-	var deltas []string
+	var deltas, thoughts []string
 	var prevCall ToolCall
 	prevCall.ID = "g_0"
 	prevCall.Type = "function"
@@ -328,8 +343,12 @@ func TestStreamGemini(t *testing.T) {
 			{Role: "assistant", ToolCalls: []ToolCall{prevCall}},
 			{Role: "tool", ToolCallID: "g_0", Content: `{"ok":true}`},
 		},
-		Tools: []Tool{{Type: "function", Function: ToolFunction{Name: "get_device"}}},
+		Tools:       []Tool{{Type: "function", Function: ToolFunction{Name: "get_device"}}},
+		OnReasoning: func(s string) { thoughts = append(thoughts, s) },
 	}, func(s string) { deltas = append(deltas, s) })
+	if strings.Join(thoughts, "") != "思考" {
+		t.Fatalf("OnReasoning: %v", thoughts)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -341,5 +360,40 @@ func TestStreamGemini(t *testing.T) {
 	}
 	if usage != (Usage{PromptTokens: 15, CompletionTokens: 8, TotalTokens: 23, CacheHitTokens: 4}) {
 		t.Fatalf("usage: %+v", usage)
+	}
+}
+
+func TestResponsesSummaryFallback(t *testing.T) {
+	var bodies []map[string]interface{}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		bodies = append(bodies, body)
+		if body["reasoning"].(map[string]interface{})["summary"] != nil {
+			w.WriteHeader(400)
+			fmt.Fprint(w, `{"error":{"message":"Your organization must be verified to generate reasoning summaries."}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n")
+		fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n")
+	}))
+	defer ts.Close()
+	c := Client{Protocol: ProtocolOpenAIResponses, BaseURL: ts.URL, APIKey: "k", Model: "m", Thinking: true}
+	msg, _, err := c.Stream(context.Background(), Request{Messages: []Message{{Role: "user", Content: "hi"}}}, nil)
+	if err != nil || msg.Content != "ok" || len(bodies) != 2 {
+		t.Fatalf("fallback: err=%v msg=%+v requests=%d", err, msg, len(bodies))
+	}
+	// 其他 400 错误不重试。
+	bodies = nil
+	ts2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bodies = append(bodies, nil)
+		w.WriteHeader(400)
+		fmt.Fprint(w, `{"error":{"message":"bad model name"}}`)
+	}))
+	defer ts2.Close()
+	c.BaseURL = ts2.URL
+	if _, _, err := c.Stream(context.Background(), Request{Messages: []Message{{Role: "user", Content: "hi"}}}, nil); err == nil || len(bodies) != 1 {
+		t.Fatalf("unrelated 400 should not retry: err=%v requests=%d", err, len(bodies))
 	}
 }

@@ -131,6 +131,11 @@ func aiJSON(v interface{}, limit int) string {
 	if err != nil {
 		return `{"error":"结果无法序列化"}`
 	}
+	return truncJSON(b, limit)
+}
+
+// truncJSON 结果超过 limit 字节时截断并附说明（保证仍是合法 UTF-8 文本）。
+func truncJSON(b []byte, limit int) string {
 	if len(b) > limit {
 		// 按字节截断后保证仍是合法 UTF-8 文本
 		cut := string(b[:limit])
@@ -149,21 +154,61 @@ func (s *Server) runAITool(name, args, remote string) (string, string) {
 
 // runAIToolIn 执行模型发起的工具调用，只允许 allowed 中的只读工具。
 func (s *Server) runAIToolIn(allowed []string, name, args, remote string) (string, string) {
+	var tc llm.ToolCall
+	tc.Function.Name, tc.Function.Arguments = name, args
+	title, result, _ := s.runAIToolCtx(context.Background(), allowed, tc, remote, "")
+	return title, result
+}
+
+// runAIToolCtx 执行模型发起的工具调用并写入 MCP 调用日志（完整参数与结果，脱敏后保存）；
+// 返回工具标题、交给模型的结果（可能按长度上限截断）以及日志记录。
+func (s *Server) runAIToolCtx(ctx context.Context, allowed []string, tc llm.ToolCall, remote, phase string) (string, string, MCPCallLog) {
+	name, args := tc.Function.Name, tc.Function.Arguments
+	ri := aiRunFrom(ctx)
+	src := ri.Source
+	if src == "" {
+		src = aiSourceFromRemote(remote)
+	}
+	profileID := ""
+	if snap, ok := ctx.Value(aiEpochKey{}).(aiSessionEpoch); ok {
+		profileID = snap.profileID
+	}
+	entry := MCPCallLog{
+		RunID: ri.RunID, ToolCallID: tc.ID, Source: src, Phase: phase, Remote: remote,
+		ProfileID: profileID, Tool: name, Args: args, StartedAt: time.Now().UnixMilli(),
+	}
+	start := time.Now()
+	finish := func(title, modelResult, fullResult, status, errMsg string) (string, string, MCPCallLog) {
+		entry.Title, entry.Status, entry.Error = title, status, errMsg
+		entry.Result = fullResult
+		entry.ModelTruncated = status == "ok" && len(fullResult) > aiMaxToolResult
+		entry.DurationMs = time.Since(start).Milliseconds()
+		return title, modelResult, s.recordToolCall(entry)
+	}
 	t := s.lookupTool(name)
 	if t == nil || !inList(allowed, name) || t.Write {
-		return "", `{"error":"不允许调用该工具"}`
+		const denied = `{"error":"不允许调用该工具"}`
+		return finish("", denied, denied, "denied", "不允许调用该工具")
 	}
 	a := map[string]json.RawMessage{}
 	if strings.TrimSpace(args) != "" {
 		if err := json.Unmarshal([]byte(args), &a); err != nil {
-			return t.Title, `{"error":"参数不是有效的 JSON：` + strings.ReplaceAll(err.Error(), `"`, `'`) + `"}`
+			msg := `{"error":"参数不是有效的 JSON：` + strings.ReplaceAll(err.Error(), `"`, `'`) + `"}`
+			return finish(t.Title, msg, msg, "error", "参数不是有效的 JSON："+err.Error())
 		}
 	}
 	res, err := t.Run(s, a, remote)
 	if err != nil {
-		return t.Title, aiJSON(map[string]string{"error": err.Error()}, 2000)
+		msg := aiJSON(map[string]string{"error": err.Error()}, 2000)
+		full, _ := json.Marshal(map[string]string{"error": err.Error()})
+		return finish(t.Title, msg, string(full), "error", err.Error())
 	}
-	return t.Title, aiJSON(res, aiMaxToolResult)
+	full, merr := json.Marshal(res)
+	if merr != nil {
+		const bad = `{"error":"结果无法序列化"}`
+		return finish(t.Title, bad, bad, "error", "结果无法序列化："+merr.Error())
+	}
+	return finish(t.Title, truncJSON(full, aiMaxToolResult), string(full), "ok", "")
 }
 
 type aiChatReq struct {
@@ -410,6 +455,8 @@ func (s *Server) handleAIDiagnose(w http.ResponseWriter, r *http.Request) error 
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(c.AI.TimeoutSec)*time.Second)
 	defer cancel()
+	// 诊断与随后的自检共用同一机房快照和调用关联 ID。
+	ctx = withAIRun(s.withProfileEpoch(ctx), "ai_diagnose")
 
 	// 背景：当前概况（必要时加上重点设备的详情与近 1 小时统计）
 	t, _ := s.Topo.Snapshot()
@@ -483,8 +530,10 @@ func (s *Server) aiLoop(ctx context.Context, c config.Config, msgs []llm.Message
 // aiLoopWith 同 aiLoop，可指定允许的工具和工具调用次数上限。
 func (s *Server) aiLoopWith(ctx context.Context, c config.Config, msgs []llm.Message, names []string, maxRounds, maxCalls, maxTokens int, remote string, emit func(map[string]interface{})) (aiRunResult, error) {
 	ctx = s.withProfileEpoch(ctx)
+	ctx = withAIRun(ctx, aiSourceFromRemote(remote))
 	cl := s.aiClient(c)
 	tools := s.aiToolDefs(names)
+	emit(map[string]interface{}{"t": "run", "run_id": aiRunFrom(ctx).RunID, "thinking": c.AI.Thinking})
 	var res aiRunResult
 	for round := 0; ; round++ {
 		if err := s.checkProfileEpoch(ctx); err != nil {
@@ -499,7 +548,9 @@ func (s *Server) aiLoopWith(ctx context.Context, c config.Config, msgs []llm.Mes
 		if round >= maxRounds || res.Calls >= maxCalls {
 			useTools = nil // 最后一轮不再给工具，强制给出结论
 		}
-		msg, usage, err := cl.Stream(ctx, llm.Request{Messages: msgs, Tools: useTools, MaxTokens: maxTokens}, func(d string) {
+		msg, usage, err := cl.Stream(ctx, llm.Request{Messages: msgs, Tools: useTools, MaxTokens: maxTokens, OnReasoning: func(d string) {
+			emit(map[string]interface{}{"t": "thinking", "text": d})
+		}}, func(d string) {
 			emit(map[string]interface{}{"t": "delta", "text": d})
 		})
 		res.Usage.Add(usage)
@@ -543,8 +594,12 @@ func (s *Server) aiExecCallsInCtx(ctx context.Context, names []string, calls []l
 		if err := s.checkProfileEpoch(ctx); err != nil {
 			return out, err
 		}
-		title, result := s.runAIToolIn(names, tc.Function.Name, tc.Function.Arguments, remote)
-		ev := map[string]interface{}{"t": "tool", "name": tc.Function.Name, "title": title, "args": truncRunes(tc.Function.Arguments, 300)}
+		title, result, rec := s.runAIToolCtx(ctx, names, tc, remote, phase)
+		ev := map[string]interface{}{"t": "tool", "name": tc.Function.Name, "title": title, "args": truncRunes(rec.Args, 300), // 已脱敏，与调用日志一致
+			"call_id": rec.ID, "status": rec.Status, "ms": rec.DurationMs, "result_bytes": rec.ResultBytes}
+		if rec.Error != "" {
+			ev["error"] = truncRunes(rec.Error, 300)
+		}
 		if phase != "" {
 			ev["phase"] = phase
 		}

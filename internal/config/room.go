@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -453,4 +454,114 @@ func PatchRoomSettings(existing RoomSettings, raw []byte) (RoomSettings, error) 
 		return RoomSettings{}, err
 	}
 	return next, nil
+}
+
+// ---- 机房配置导入导出 ----
+
+func maskProxyUserinfo(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.User == nil {
+		return raw
+	}
+	return u.Scheme + "://***@" + u.Host
+}
+
+// MaskRoomSettingsForExport 导出时使用：在 MaskRoomSettings 基础上再隐藏代理地址中的账号密码。
+func MaskRoomSettingsForExport(rs RoomSettings) RoomSettings {
+	out := MaskRoomSettings(rs)
+	out.Alert.ProxyURL = maskProxyUserinfo(out.Alert.ProxyURL)
+	return out
+}
+
+// IsMaskedSecret 判断导入文件中的值是否为导出时生成的脱敏占位符。
+func IsMaskedSecret(v string) bool {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return false
+	}
+	return v == maskedSecretHint || v == "（已配置）" || strings.HasSuffix(v, maskedURLSuffix) ||
+		strings.Contains(v, "****") || strings.Contains(v, "://***@")
+}
+
+// SecretResolution 说明导入时某个凭据字段的处理方式。
+type SecretResolution struct {
+	Field  string `json:"field"`
+	Action string `json:"action"` // imported（使用文件中的值）/ kept（文件中为脱敏占位，保留目标机房原值）/ cleared（占位且目标机房无原值，需要重新填写）
+}
+
+// ResolveImportedSecrets 处理导入设置中的凭据字段。masked 为 true（文件是脱敏导出）时，脱敏占位符在目标机房已有该凭据时保留原值，
+// 没有时清空并提示重新填写；masked 为 false（文件包含明文凭据）时一律使用文件中的值。
+// 返回处理后的设置与每个凭据字段的处理说明（只列出导入文件中非空的字段）。
+func ResolveImportedSecrets(existing, imported RoomSettings, masked bool) (RoomSettings, []SecretResolution) {
+	out := imported.Clone()
+	var notes []SecretResolution
+	resolve := func(field string, dst *string, cur string) {
+		v := strings.TrimSpace(*dst)
+		if v == "" {
+			return
+		}
+		if !masked || !IsMaskedSecret(v) {
+			notes = append(notes, SecretResolution{Field: field, Action: "imported"})
+			return
+		}
+		if strings.TrimSpace(cur) != "" {
+			*dst = cur
+			notes = append(notes, SecretResolution{Field: field, Action: "kept"})
+			return
+		}
+		*dst = ""
+		notes = append(notes, SecretResolution{Field: field, Action: "cleared"})
+	}
+	a, e := &out.Alert, existing.Alert
+	resolve("alert.webhook_url", &a.WebhookURL, e.WebhookURL)
+	resolve("alert.dingtalk_url", &a.DingTalkURL, e.DingTalkURL)
+	resolve("alert.dingtalk_secret", &a.DingTalkSecret, e.DingTalkSecret)
+	resolve("alert.feishu_url", &a.FeishuURL, e.FeishuURL)
+	resolve("alert.feishu_secret", &a.FeishuSecret, e.FeishuSecret)
+	resolve("alert.slack_url", &a.SlackURL, e.SlackURL)
+	resolve("alert.generic_webhook_url", &a.GenericWebhookURL, e.GenericWebhookURL)
+	resolveProxy(&a.ProxyURL, e.ProxyURL, masked, &notes)
+	resolve("locate.community", &out.Locate.Community, existing.Locate.Community)
+	keys := make([]string, 0, len(out.Locate.Switches))
+	for k := range out.Locate.Switches {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		sw := out.Locate.Switches[k]
+		resolve("locate.switches."+k+".community", &sw.Community, existing.Locate.Switches[k].Community)
+		out.Locate.Switches[k] = sw
+	}
+	return out, notes
+}
+
+// resolveProxy 代理地址只隐藏了账号密码：目标机房原代理是同一主机时保留其账号密码，否则只保留地址、去掉账号并提示重新填写。
+func resolveProxy(dst *string, cur string, masked bool, notes *[]SecretResolution) {
+	v := strings.TrimSpace(*dst)
+	if v == "" {
+		return
+	}
+	if !masked || !strings.Contains(v, "://***@") {
+		if u, err := url.Parse(v); err == nil && u.User != nil {
+			*notes = append(*notes, SecretResolution{Field: "alert.proxy_url", Action: "imported"})
+		}
+		return
+	}
+	in, err := url.Parse(strings.Replace(v, "://***@", "://", 1))
+	if err != nil {
+		*dst = ""
+		*notes = append(*notes, SecretResolution{Field: "alert.proxy_url", Action: "cleared"})
+		return
+	}
+	if old, err := url.Parse(strings.TrimSpace(cur)); err == nil && old.User != nil && old.Host == in.Host && old.Scheme == in.Scheme {
+		*dst = cur
+		*notes = append(*notes, SecretResolution{Field: "alert.proxy_url", Action: "kept"})
+		return
+	}
+	*dst = in.Scheme + "://" + in.Host
+	*notes = append(*notes, SecretResolution{Field: "alert.proxy_url", Action: "cleared"})
 }
