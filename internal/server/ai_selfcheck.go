@@ -381,7 +381,9 @@ func (s *Server) aiSelfCheck(ctx context.Context, c config.Config, run aiRunResu
 			emit(map[string]interface{}{"t": "status", "text": "正在自检：根据核实结果复核…"})
 		}
 		g.reset()
-		msg, usage, err := cl.Stream(ctx, llm.Request{Messages: msgs, Tools: useTools}, g.delta)
+		msg, usage, err := cl.Stream(ctx, llm.Request{Messages: msgs, Tools: useTools, OnReasoning: func(d string) {
+			emit(map[string]interface{}{"t": "thinking", "text": d, "phase": "review"})
+		}}, g.delta)
 		out.Usage.Add(usage)
 		if err != nil {
 			out.Result = "failed"

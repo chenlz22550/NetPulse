@@ -306,45 +306,8 @@ func (m *Manager) RollbackVersion(profileID, verID string) (VersionMeta, Version
 		return VersionMeta{}, VersionMeta{}, fmt.Errorf("创建回滚前备份失败: %w", err)
 	}
 
-	prevTopo, err := m.loadRoomTopology(profileID)
-	if err != nil {
+	if err := m.applyRoomState(profileID, active, snap.Topology, snap.Settings); err != nil {
 		return VersionMeta{}, VersionMeta{}, err
-	}
-	prevSettings, err := m.loadRoomSettings(profileID)
-	if err != nil {
-		return VersionMeta{}, VersionMeta{}, err
-	}
-
-	if err := m.saveRoomTopology(profileID, snap.Topology); err != nil {
-		return VersionMeta{}, VersionMeta{}, err
-	}
-	if err := config.SaveRoomSettings(m.roomSettingsPath(profileID), snap.Settings); err != nil {
-		_ = m.saveRoomTopology(profileID, prevTopo)
-		return VersionMeta{}, VersionMeta{}, err
-	}
-
-	if active {
-		if err := m.topo.SwapActive(snap.Topology); err != nil {
-			_ = m.saveRoomTopology(profileID, prevTopo)
-			_ = config.SaveRoomSettings(m.roomSettingsPath(profileID), prevSettings)
-			return VersionMeta{}, VersionMeta{}, err
-		}
-		if err := m.cfg.ApplyRoom(snap.Settings); err != nil {
-			_ = m.topo.SwapActive(prevTopo)
-			_ = m.saveRoomTopology(profileID, prevTopo)
-			_ = config.SaveRoomSettings(m.roomSettingsPath(profileID), prevSettings)
-			return VersionMeta{}, VersionMeta{}, err
-		}
-		if m.alerts != nil {
-			m.alerts.SetTopology(snap.Topology)
-		}
-		if m.mon != nil {
-			m.mon.Sync(monitor.BuildTargets(snap.Topology, snap.Settings.Ping))
-		}
-		// An active rollback changes the context used by in-flight AI work and
-		// previously previewed operations, just like a profile activation.
-		m.epoch.Add(1)
-		m.topo.NotifyCurrent()
 	}
 
 	m.touchProfile(profileID)
@@ -507,4 +470,50 @@ func (m *Manager) PreviewRollback(profileID, verID string) (*RollbackPreview, er
 		CanRollback: canRollback,
 		BusyReason:  busyReason,
 	}, nil
+}
+
+// applyRoomState 把拓扑与机房设置写入 profileID 的独立目录；如果它是当前激活机房，同时切换运行时状态。
+// 任一步失败都会恢复原拓扑与设置。调用方须持有 switchMu，激活机房还须持有拓扑锁。
+func (m *Manager) applyRoomState(profileID string, active bool, t *topology.Topology, rs config.RoomSettings) error {
+	prevTopo, err := m.loadRoomTopology(profileID)
+	if err != nil {
+		return err
+	}
+	prevSettings, err := m.loadRoomSettings(profileID)
+	if err != nil {
+		return err
+	}
+
+	if err := m.saveRoomTopology(profileID, t); err != nil {
+		return err
+	}
+	if err := config.SaveRoomSettings(m.roomSettingsPath(profileID), rs); err != nil {
+		_ = m.saveRoomTopology(profileID, prevTopo)
+		return err
+	}
+
+	if active {
+		if err := m.topo.SwapActive(t); err != nil {
+			_ = m.saveRoomTopology(profileID, prevTopo)
+			_ = config.SaveRoomSettings(m.roomSettingsPath(profileID), prevSettings)
+			return err
+		}
+		if err := m.cfg.ApplyRoom(rs); err != nil {
+			_ = m.topo.SwapActive(prevTopo)
+			_ = m.saveRoomTopology(profileID, prevTopo)
+			_ = config.SaveRoomSettings(m.roomSettingsPath(profileID), prevSettings)
+			return err
+		}
+		if m.alerts != nil {
+			m.alerts.SetTopology(t)
+		}
+		if m.mon != nil {
+			m.mon.Sync(monitor.BuildTargets(t, rs.Ping))
+		}
+		// Replacing the active room's state (rollback or import) changes the context used by
+		// in-flight AI work and previously previewed operations, just like a profile activation.
+		m.epoch.Add(1)
+		m.topo.NotifyCurrent()
+	}
+	return nil
 }

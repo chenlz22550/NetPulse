@@ -381,6 +381,16 @@ func (m *Manager) ActiveID() string {
 	return m.reg.ActiveID
 }
 
+// NameOf returns the display name of profile id, or "" if it does not exist.
+func (m *Manager) NameOf(id string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if idx := m.findIdxLocked(id); idx >= 0 {
+		return m.reg.Profiles[idx].Name
+	}
+	return ""
+}
+
 // Epoch returns a monotonically increasing counter incremented on every successful profile activation.
 func (m *Manager) Epoch() int64 {
 	return m.epoch.Load()

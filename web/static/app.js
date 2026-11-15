@@ -533,10 +533,92 @@
     return html;
   }
 
+  // ---------------------------------------------------------------------------
+  // AI 思考过程面板：运行中展开显示执行步骤、工具调用和模型服务返回的思考内容；完成、出错或停止后自动折叠。
+  // 只展示模型服务主动返回的思考内容/摘要（需所选模型支持并开启「深度思考」），不会要求模型额外输出内部推理。
+  const THINKS = new Map();
+  let thinkSeq = 0;
+  function thinkNew() {
+    const th = { id: 'th' + Date.now().toString(36) + (++thinkSeq), phase: 'running', open: true, steps: [], reasoning: '', reviewReasoning: '', start: Date.now(), ms: 0, calls: 0, runId: '', thinkingOn: null };
+    THINKS.set(th.id, th);
+    thinkTrim();
+    return th;
+  }
+  function thinkTrim() { while (THINKS.size > 200) THINKS.delete(THINKS.keys().next().value); }
+  function thinkAdopt(th) { if (th && th.id) { if (th.phase === 'running') { th.phase = 'stopped'; th.open = false; } THINKS.set(th.id, th); thinkTrim(); } return th; }
+  function thinkEvent(th, ev) {
+    if (!th) return;
+    switch (ev.t) {
+      case 'run': if (!th.runId) th.runId = ev.run_id || ''; if (ev.thinking != null) th.thinkingOn = !!ev.thinking; break;
+      case 'status': {
+        const last = th.steps[th.steps.length - 1];
+        if (ev.text && !(last && last.k === 'status' && last.text === ev.text)) th.steps.push({ k: 'status', text: ev.text, at: Date.now() });
+        break;
+      }
+      case 'thinking': if (ev.phase === 'review') th.reviewReasoning += ev.text || ''; else th.reasoning += ev.text || ''; break;
+      case 'tool':
+        th.calls++;
+        th.steps.push({ k: 'tool', name: ev.name, title: ev.title, args: ev.args || '', phase: ev.phase || '', status: ev.status || 'ok', ms: ev.ms, error: ev.error || '', call_id: ev.call_id || '', bytes: ev.result_bytes });
+        break;
+      case 'review': th.steps.push({ k: 'status', text: '开始自检：对照数据核对结论', at: Date.now() }); break;
+      case 'review_end': th.steps.push({ k: 'status', text: { pass: '自检通过', revised: '自检发现问题，已修正回答', failed: '自检未完成', skipped: '跳过自检' }[ev.result] || '自检结束', at: Date.now() }); break;
+      case 'error': thinkFinish(th, 'error', ev.error); break;
+      case 'done': thinkFinish(th, 'done'); break;
+    }
+  }
+  function thinkFinish(th, phase, note) {
+    if (!th || th.phase !== 'running') return;
+    th.phase = phase; th.ms = Date.now() - th.start; th.open = false;
+    if (note) th.note = String(note);
+  }
+  function thinkHTML(th) {
+    if (!th) return '';
+    const running = th.phase === 'running';
+    const secs = ((running ? Date.now() - th.start : th.ms) / 1000).toFixed(1);
+    const label = { running: '思考中', done: '思考过程', error: '思考过程（出错中断）', stopped: '思考过程（已停止）' }[th.phase] || '思考过程';
+    const steps = th.steps.map(x => {
+      if (x.k === 'status') return `<li class="st">${esc(x.text)}</li>`;
+      const bad = x.status && x.status !== 'ok';
+      const args = x.args && x.args !== '{}' ? ` <code class="mono">${esc(x.args)}</code>` : '';
+      const extra = [x.ms != null ? x.ms + ' ms' : '', x.bytes != null ? (x.bytes >= 1024 ? (x.bytes / 1024).toFixed(1) + ' KB' : x.bytes + ' B') : ''].filter(Boolean).join(' · ');
+      return `<li class="tool${bad ? ' bad' : ''}" ${x.call_id ? `title="调用 ID：${esc(x.call_id)}"` : ''}>${x.phase === 'review' ? '核实' : '调用'} <b>${esc(x.title || x.name)}</b>${args}
+        <span class="${bad ? 'v-down' : 'v-ok'}">${bad ? (x.status === 'denied' ? '已拒绝' : '失败') : '成功'}</span>${extra ? ` <span class="muted">${extra}</span>` : ''}${x.error ? `<div class="v-down">${esc(x.error)}</div>` : ''}</li>`;
+    }).join('');
+    const rsn = (txt, title) => txt ? `<div class="ai-think-label">${title}</div><div class="ai-think-text">${esc(txt)}</div>` : '';
+    let reasoning = rsn(th.reasoning, '模型返回的思考内容（由模型服务提供，可能为摘要）') + rsn(th.reviewReasoning, '自检阶段模型返回的思考内容');
+    if (!reasoning && !running) {
+      reasoning = `<div class="help">${th.thinkingOn === false ? '未开启「深度思考」，这里只显示执行步骤与工具调用。' : '模型服务没有返回思考内容（取决于所选模型与协议），这里只显示执行步骤与工具调用。'}</div>`;
+    }
+    return `<details class="ai-think${running ? ' running' : ''}" data-think="${esc(th.id)}" ${th.open ? 'open' : ''}>
+      <summary>${running ? '<span class="ai-spin"></span>' : ''}${label}<span class="muted"> · ${th.steps.length} 步 · 工具 ${th.calls} 次 · ${secs} 秒</span></summary>
+      <div class="ai-think-body">${steps ? `<ol class="ai-think-steps">${steps}</ol>` : ''}${reasoning}
+        ${th.note && th.phase === 'error' ? `<div class="v-down">${esc(th.note)}</div>` : ''}
+        ${th.runId ? `<div class="help">关联 ID：<code class="mono">${esc(th.runId)}</code> · <a href="#/mcp" data-run-link="${esc(th.runId)}">查看本次全部工具调用的完整参数与返回</a></div>` : ''}</div></details>`;
+  }
+  document.addEventListener('click', ev => {
+    const a = ev.target.closest && ev.target.closest('[data-run-link]');
+    if (a) sessionStorage.setItem('np_mcp_run', a.dataset.runLink);
+  });
+  // details 每次重绘都会重建，记住用户手动展开/折叠的状态。
+  document.addEventListener('toggle', ev => {
+    const d = ev.target;
+    if (!d || !d.matches || !d.matches('details.ai-think[data-think]')) return;
+    const th = THINKS.get(d.dataset.think);
+    if (th) th.open = d.open;
+  }, true);
+
   function aiPage(app, focusID) {
-    const store = () => sessionStorage.setItem('np_ai', JSON.stringify(chat.slice(-40)));
+    // 会话内保存最近 40 条；思考内容只保留末尾一段，避免超出浏览器存储上限（完整工具调用见 MCP 页调用日志）。
+    const store = () => {
+      const slim = chat.slice(-40).map(m => m.think ? { ...m, think: { ...m.think, reasoning: (m.think.reasoning || '').slice(-4000), reviewReasoning: (m.think.reviewReasoning || '').slice(-2000), steps: (m.think.steps || []).slice(-60) } } : m);
+      try { sessionStorage.setItem('np_ai', JSON.stringify(slim)); }
+      catch (e) {
+        try { sessionStorage.setItem('np_ai', JSON.stringify(slim.slice(-10).map(m => { const c = { ...m }; delete c.think; return c; }))); } catch (_) { /* 存储已满时放弃保存，不影响当前页面 */ }
+      }
+    };
     let chat = [];
     try { chat = JSON.parse(sessionStorage.getItem('np_ai') || '[]'); } catch (e) { chat = []; }
+    chat.forEach(m => { if (m.think) thinkAdopt(m.think); });
     let settings = null, busy = null;
     const QUICK = [
       ['一键诊断', '帮我全面诊断一下当前网络：有没有离线、丢包、延迟高的设备？原因可能是什么？需要我做什么？'],
@@ -574,7 +656,7 @@
     const log = $('#aiLog');
     const msgHTML = (m, i) => {
       if (m.role === 'user') return `<div class="ai-msg user" data-i="${i}"><div class="ai-bubble">${esc(m.content).replace(/\n/g, '<br>')}</div></div>`;
-      const tools = (m.tools || []).map(t => `<span class="ai-tool${t.phase === 'review' ? ' review' : ''}" title="${esc(t.args || '')}">${t.phase === 'review' ? '核实' : '查询'} · ${esc(t.title || t.name)}${t.args && t.args !== '{}' ? ' <span class="muted">' + esc(t.args.slice(0, 60)) + '</span>' : ''}</span>`).join('');
+      const tools = m.think ? '' : (m.tools || []).map(t => `<span class="ai-tool${t.phase === 'review' ? ' review' : ''}" title="${esc(t.args || '')}">${t.phase === 'review' ? '核实' : '查询'} · ${esc(t.title || t.name)}${t.args && t.args !== '{}' ? ' <span class="muted">' + esc(t.args.slice(0, 60)) + '</span>' : ''}</span>`).join('');
       const ck = m.check;
       let check = '';
       if (ck && ck.result === 'reviewing') check = '';
@@ -585,7 +667,7 @@
       const meta = m.meta ? `<div class="ai-meta">${esc(m.meta)}</div>` : '';
       const status = m.status ? `<div class="ai-status"><span class="ai-spin"></span>${esc(m.status)}</div>` : '';
       const err = m.error ? `<div class="ai-err">${esc(m.error)}</div>` : '';
-      return `<div class="ai-msg bot" data-i="${i}">${tools ? `<div class="ai-tools">${tools}</div>` : ''}<div class="ai-md">${mdLite(m.content)}</div>${check}${draft}${status}${err}${meta}</div>`;
+      return `<div class="ai-msg bot" data-i="${i}">${m.think ? thinkHTML(m.think) : ''}${tools ? `<div class="ai-tools">${tools}</div>` : ''}<div class="ai-md">${mdLite(m.content)}</div>${check}${draft}${status}${err}${meta}</div>`;
     };
     const renderLog = () => {
       log.innerHTML = chat.length ? chat.map(msgHTML).join('') :
@@ -610,7 +692,7 @@
       if (!settings || !settings.ready) { toast('请先在右侧设置 API Key', true); $('#aiKeyUnlock, #aiSet [name=api_key]')?.focus(); return; }
       const history = chat.filter(m => !m.error && m.content).map(m => ({ role: m.role, content: m.content }));
       chat.push({ role: 'user', content: question });
-      const bot = { role: 'assistant', content: '', tools: [], status: '正在连接…' };
+      const bot = { role: 'assistant', content: '', tools: [], status: '正在连接…', think: thinkNew() };
       chat.push(bot);
       const bi = chat.length - 1;
       renderLog();
@@ -640,6 +722,7 @@
             if (!line) continue;
             let ev;
             try { ev = JSON.parse(line); } catch (e) { continue; }
+            thinkEvent(bot.think, ev);
             if (ev.t === 'status') bot.status = ev.text;
             else if (ev.t === 'delta') {
               if (pendingBreak && bot.content && !bot.content.endsWith('\n')) bot.content += '\n\n';
@@ -667,7 +750,9 @@
         if (bot.check && bot.check.result === 'reviewing') bot.check = null;
         if (!bot.content && bot.draft) { bot.content = bot.draft; bot.draft = ''; }
         if (!bot.content && !bot.error) bot.error = '模型没有返回内容，请重试。';
+        thinkFinish(bot.think, bot.error ? 'error' : 'done');
       } catch (e) {
+        thinkFinish(bot.think, e.name === 'AbortError' ? 'stopped' : 'error', e.name === 'AbortError' ? '' : errMsg(e));
         if (bot.check && bot.check.result === 'reviewing') bot.check = null;
         if (!bot.content && bot.draft) { bot.content = bot.draft; bot.draft = ''; }
         if (e.name === 'AbortError') bot.error = bot.content ? '' : '已停止';
@@ -926,11 +1011,11 @@ body { padding: 32px 16px; }
     function drawView() {
       const v = $('#rView');
       if (live) {
-        const tools = live.tools.map(t => `<span class="ai-tool">查询 · ${esc(t.title || t.name)}</span>`).join('');
+        const tools = '';
         $('#rTitle').textContent = '正在生成' + (REPORT_RANGES.find(x => x[0] === live.range) || [, ''])[1] + '…';
         const stick = v.scrollHeight - v.scrollTop - v.clientHeight < 60;
         v.innerHTML = `<div class="rpt-doc">${live.stats ? reportKPIs(live.stats) : ''}
-          ${tools ? `<div class="ai-tools">${tools}</div>` : ''}
+          ${thinkHTML(live.think)}${tools}
           <div class="ai-md rpt-md">${mdLite(live.content, { doc: true })}</div>
           ${live.status ? `<div class="ai-status"><span class="ai-spin"></span>${esc(live.status)}</div>` : ''}
           ${live.error ? `<div class="ai-err">${esc(live.error)}</div>` : ''}</div>`;
@@ -958,12 +1043,13 @@ body { padding: 32px 16px; }
       if (!settings || !settings.ready) { toast('请先在「AI 诊断」页设置 API Key 并启用，或点「生成统计报告（无需 AI）」', true); return; }
       const ctl = new AbortController();
       busy = ctl;
-      live = { range: rg, content: '', tools: [], status: '正在连接…', stats: null, error: '' };
+      live = { range: rg, content: '', tools: [], status: '正在连接…', stats: null, error: '', think: thinkNew() };
       $('#rGen').disabled = true;
       drawView();
       let got = null;
       try {
         await streamNDJSON('api/ai/report', { range: rg, note: $('#rNote').value.trim() }, ctl.signal, ev => {
+          thinkEvent(live.think, ev);
           if (ev.t === 'status') live.status = ev.text;
           else if (ev.t === 'stats') live.stats = ev.stats;
           else if (ev.t === 'delta') { live.content += ev.text; live.status = ''; }
@@ -975,8 +1061,10 @@ body { padding: 32px 16px; }
           drawView();
         });
         if (!got && !live.error) live.error = '没有收到完整的报告，请重试。';
+        thinkFinish(live.think, got ? 'done' : 'error');
       } catch (e) {
         live.error = e.name === 'AbortError' ? '已停止生成' : errMsg(e);
+        thinkFinish(live.think, e.name === 'AbortError' ? 'stopped' : 'error', e.name === 'AbortError' ? '' : live.error);
       } finally {
         busy = null;
         $('#rGen').disabled = false;
@@ -1266,13 +1354,13 @@ body { padding: 32px 16px; }
     }
     async function runOpt() {
       const body = $('#optBody'), foot = $('#optFoot');
-      const st = { status: '正在连接…', tools: [], text: '', error: '' };
+      const st = { status: '正在连接…', tools: [], text: '', error: '', think: thinkNew() };
       const draw = () => {
         if (!opt) return;
         const pre = st.text.split('```')[0].trim();
         body.innerHTML = `<div class="help" style="margin-top:0">AI 会读取全部设备的厂商、主机名、接线、告警设置和近 7 天的丢包/延迟/中断统计，
             给出：<b>设备分类</b>（写成标签）、<b>配置建议</b>、<b>需要检查的设备</b>。所有修改都要你勾选确认后才会应用。设备较多时需要 1~3 分钟。</div>
-          ${st.tools.length ? `<div class="ai-tools">${st.tools.map(t => `<span class="ai-tool">查询 · ${esc(t.title || t.name)}</span>`).join('')}</div>` : ''}
+          ${thinkHTML(st.think)}
           ${pre ? `<div class="ai-md">${mdLite(pre)}</div>` : ''}
           ${st.text.includes('```') && !st.error ? '<div class="ai-status"><span class="ai-spin"></span>正在生成建议清单…</div>' : ''}
           ${st.status ? `<div class="ai-status"><span class="ai-spin"></span>${esc(st.status)}</div>` : ''}
@@ -1305,6 +1393,7 @@ body { padding: 32px 16px; }
             if (!line) continue;
             let ev;
             try { ev = JSON.parse(line); } catch (e) { continue; }
+            thinkEvent(st.think, ev);
             if (ev.t === 'status') st.status = ev.text;
             else if (ev.t === 'stats') st.status = `已汇总 ${ev.stats.nodes} 个节点、${ev.stats.switches} 台交换机（${ev.stats.with_stats} 台有历史数据），正在请求模型…`;
             else if (ev.t === 'delta') { st.text += ev.text; st.status = ''; }
@@ -1317,8 +1406,10 @@ body { padding: 32px 16px; }
           }
         }
         if (!result && !st.error) st.error = '模型没有返回结果，请重试。';
+        thinkFinish(st.think, result ? 'done' : 'error', st.error);
       } catch (e) {
         st.error = e.name === 'AbortError' ? '已停止' : errMsg(e);
+        thinkFinish(st.think, e.name === 'AbortError' ? 'stopped' : 'error', e.name === 'AbortError' ? '' : st.error);
       } finally {
         if (opt) opt.busy = null;
       }
@@ -2168,6 +2259,8 @@ body { padding: 32px 16px; }
           <form id="roomCreate"><label class="f"><span>新配置名称</span><input name="name" required maxlength="80" placeholder="例如：总部机房"></label>
           <div class="checks"><label><input name="copy" type="checkbox">复制当前机房配置、设备和拓扑</label></div>
           <div class="btns"><button class="btn" type="submit">保存为新配置</button></div></form>
+          <div class="room-import-new"><label class="f"><span>从导出文件导入为新机房</span><input id="roomImportNewFile" type="file" accept=".json,application/json"></label>
+          <div class="help">导入为新机房不会激活，也不会影响现有机房；导入前会先显示将要导入的内容供确认。</div></div>
           <div class="help">保存新配置不会自动激活；仅当前激活机房执行 ping 探测、扫描、SNMP 与告警。通知渠道、扫描任务、SNMP、监控时段、Ping 参数、维护窗口和历史数据均按机房隔离；登录密码、历史保留天数、MCP 与 AI 连接为全局设置。</div>
         </div></div>
         <div class="panel"><div class="ph">维护窗口 · 当前机房</div><div class="pb">
@@ -2315,6 +2408,8 @@ body { padding: 32px 16px; }
         <div class="btns">${p.active ? '' : `<button class="btn small primary" data-room="${esc(p.id)}" data-action="activate">激活预览</button>`}
         <button class="btn small" data-room="${esc(p.id)}" data-action="settings">机房设置</button>
         <button class="btn small" data-room="${esc(p.id)}" data-action="versions">配置版本</button>
+        <button class="btn small" data-room="${esc(p.id)}" data-action="export">导出</button>
+        <button class="btn small" data-room="${esc(p.id)}" data-action="import">导入覆盖</button>
         <button class="btn small" data-room="${esc(p.id)}" data-action="rename">改名</button>
         ${p.active ? '' : `<button class="btn small danger" data-room="${esc(p.id)}" data-action="delete">删除</button>`}</div></div>`).join('') || '<p class="help">暂无机房配置</p>';
     }
@@ -2341,6 +2436,8 @@ body { padding: 32px 16px; }
         if (action === 'versions') { await showVersions(p); return; }
         if (action === 'activate') { await showPreview(p); return; }
         if (action === 'settings') { await showProfileSettings(p); return; }
+        if (action === 'export') { showExport(p); return; }
+        if (action === 'import') { showImport(p); return; }
         await api(action === 'delete' ? 'DELETE' : action === 'rename' ? 'PUT' : 'POST', 'api/profiles/' + encodeURIComponent(p.id), { action, name });
         if (action === 'activate') { resetProfileView('#/settings'); return; }
         if (action === 'delete' && $('#roomInspect')) $('#roomInspect').innerHTML = '';
@@ -2425,6 +2522,92 @@ body { padding: 32px 16px; }
         catch (e) { toast(errMsg(e), true); ev.target.disabled = false; }
       };
     }
+    // ---- 按机房导入导出 ----
+    const SECRET_ACTION_TXT = { imported: '使用文件中的值', kept: '文件中为脱敏占位，保留目标机房原值', cleared: '文件中为脱敏占位且目标机房没有原值，导入后需重新填写' };
+    function showExport(p) {
+      const url = include => 'api/profiles/' + encodeURIComponent(p.id) + '/export' + (include ? '?secrets=include' : '');
+      $('#roomInspect').innerHTML = `<div class="room-preview">
+        <div class="room-preview-head"><h3>导出机房配置 · ${esc(p.name)}</h3><button class="btn small" id="roomInspectClose">关闭</button></div>
+        <p class="help">导出文件包含该机房的拓扑（交换机、链路、设备）和机房级设置（告警通知、监控时段、Ping 参数、网段扫描、端口定位）。不包含登录密码、MCP、AI 等全局配置，也不包含历史监控数据、告警记录和配置版本。</p>
+        <div class="checks"><label><input type="checkbox" id="roomExportSecrets">包含明文凭据（Webhook 地址、签名密钥、SNMP 团体名、代理账号）</label></div>
+        <p class="help" id="roomExportSecretsHint">默认导出时凭据会脱敏；导入到已有这些凭据的机房时会保留其原值，导入到新机房则需要重新填写。</p>
+        <div class="btns"><a class="btn primary" id="roomExportLink" href="${url(false)}" download>下载导出文件</a></div></div>`;
+      bindInspectClose();
+      $('#roomExportSecrets').onchange = ev => {
+        $('#roomExportLink').href = url(ev.target.checked);
+        $('#roomExportSecretsHint').innerHTML = ev.target.checked
+          ? '<span class="v-warn">导出文件将包含明文凭据，请妥善保管，不要发送到不可信的地方。</span>'
+          : '默认导出时凭据会脱敏；导入到已有这些凭据的机房时会保留其原值，导入到新机房则需要重新填写。';
+      };
+    }
+    function renderImportPreview(d) {
+      const c = d.current || {}, n = d.incoming || {};
+      const row = (label, a, b) => `<tr><td>${label}</td>${d.new_profile ? '' : `<td>${esc(String(a == null ? '-' : a))}</td>`}<td><b>${esc(String(b == null ? '-' : b))}</b></td></tr>`;
+      const secrets = (d.secrets || []).map(x => `<div><code>${esc(x.field)}</code>：<span class="${x.action === 'cleared' ? 'v-warn' : ''}">${esc(SECRET_ACTION_TXT[x.action] || x.action)}</span></div>`).join('');
+      const warns = (d.warnings || []).map(x => `<div class="v-warn">• ${esc(x)}</div>`).join('');
+      const exported = Number.isFinite(Date.parse(d.exported_at)) ? Charts.fmtFull(Date.parse(d.exported_at)) : '';
+      return `<p style="margin:6px 0">${d.new_profile
+        ? `将创建新机房「<b>${esc(d.target_name)}</b>」（不激活）。`
+        : `将<b>整体替换</b>机房「<b>${esc(d.target_name)}</b>」${d.target_active ? '（当前激活机房）' : ''}的拓扑和机房设置，原有内容不会合并保留。`}</p>
+        <div class="help">来源：${esc(d.source_name || '未知机房')}${exported ? ' · 导出于 ' + esc(exported) : ''} · 文件凭据：${d.file_secrets === 'included' ? '包含明文' : '已脱敏'}</div>
+        <table class="grid flat" style="margin:8px 0"><thead><tr><th></th>${d.new_profile ? '' : '<th>当前</th>'}<th>导入后</th></tr></thead><tbody>
+          ${row('站点名称', c.site_name, n.site_name)}${row('交换机', c.switches, n.switches)}${row('设备', c.nodes, n.nodes)}${row('链路', c.links, n.links)}${row('扫描任务', c.scan_jobs, n.scan_jobs)}
+        </tbody></table>
+        ${d.new_profile ? '' : `<div class="room-kv"><span class="k">会被替换的部分</span><span>${(d.changed_sections || []).length ? d.changed_sections.map(x => `<span class="badge">${esc(x)}</span>`).join(' ') : '<span class="muted">内容与当前一致</span>'}</span></div>`}
+        ${secrets ? `<div class="room-kv"><span class="k">凭据处理</span><div>${secrets}</div></div>` : ''}
+        <div class="room-kv"><span class="k">不受影响</span><span>${(d.unaffected || []).map(esc).join('；')}</span></div>
+        ${warns ? `<div style="margin-top:8px">${warns}</div>` : ''}
+        ${d.new_profile ? '' : '<p class="help">确认后会先把该机房当前配置自动保存为「导入前自动备份」版本，可在「配置版本」中恢复。</p>'}`;
+    }
+    function readFileText(file) {
+      return new Promise((resolve, reject) => {
+        if (file.size > 8 * 1024 * 1024) { reject(new Error('导入文件过大（上限 8 MB）')); return; }
+        const fr = new FileReader();
+        fr.onload = () => resolve(String(fr.result || ''));
+        fr.onerror = () => reject(new Error('读取文件失败'));
+        fr.readAsText(file, 'utf-8');
+      });
+    }
+    // p 为空表示导入为新机房。
+    async function showImport(p, presetFile) {
+      const target = p ? 'api/profiles/' + encodeURIComponent(p.id) + '/import' : 'api/profiles/import';
+      const title = p ? `导入覆盖 · ${esc(p.name)}` : '导入为新机房';
+      $('#roomInspect').innerHTML = `<div class="room-preview">
+        <div class="room-preview-head"><h3>${title}</h3><button class="btn small" id="roomInspectClose">关闭</button></div>
+        ${p ? '<label class="f"><span>选择导出文件（.json）</span><input type="file" id="roomImportFile" accept=".json,application/json"></label>' : ''}
+        <div id="roomImportPreview"><p class="help">${p ? '选择文件后先校验并显示覆盖说明，确认前不会修改任何配置。' : '正在校验文件…'}</p></div></div>`;
+      bindInspectClose();
+      let text = '';
+      const preview = async file => {
+        const box = $('#roomImportPreview');
+        box.innerHTML = '<p class="muted">正在校验文件…</p>';
+        try {
+          text = await readFileText(file);
+          const res = await api('POST', target + '?dry_run=1', text, { text: true });
+          const d = res.preview || {};
+          box.innerHTML = renderImportPreview(d) + `<div class="btns"><button class="btn primary" id="roomImportConfirm">${d.new_profile ? '确认导入为新机房' : '确认覆盖导入'}</button></div>`;
+          $('#roomImportConfirm').onclick = async ev => {
+            if (!d.new_profile && !confirm(`确认用文件内容整体替换「${d.target_name}」的拓扑和机房设置？${d.target_active ? '\n这是当前激活机房，导入后立即生效。' : ''}\n当前配置会先自动备份。`)) return;
+            ev.target.disabled = true;
+            try {
+              const r = await api('POST', target, text, { text: true });
+              if (!d.new_profile && d.target_active) { resetProfileView('#/settings'); return; }
+              await loadRooms();
+              box.innerHTML = `<p class="v-ok">${d.new_profile ? `已导入为新机房「${esc(d.target_name)}」（未激活）。` : `已导入到「${esc(d.target_name)}」，原配置已备份为 <code>${esc(r.backup_version || '')}</code>。`}</p>`;
+              toast(d.new_profile ? '已导入为新机房' : '机房配置已导入');
+            } catch (e) { toast(errMsg(e), true); ev.target.disabled = false; }
+          };
+        } catch (e) {
+          box.innerHTML = `<p class="v-down">文件未通过校验，未做任何修改：${esc(e.message)}</p>${e.problems ? '<ul>' + e.problems.map(x => `<li>${esc(x)}</li>`).join('') + '</ul>' : ''}`;
+        }
+      };
+      if (p) $('#roomImportFile').onchange = ev => { const f = ev.target.files[0]; if (f) preview(f); };
+      if (presetFile) await preview(presetFile);
+    }
+    $('#roomImportNewFile').onchange = async ev => {
+      const f = ev.target.files[0]; if (!f) return;
+      try { await showImport(null, f); } finally { ev.target.value = ''; }
+    };
     async function showVersions(p) {
       const base = 'api/profiles/' + encodeURIComponent(p.id) + '/versions';
       $('#roomInspect').innerHTML = `<div class="room-preview"><p class="muted">正在加载「${esc(p.name)}」配置版本…</p></div>`;
@@ -2441,7 +2624,7 @@ body { padding: 32px 16px; }
         <div id="roomVersions"></div>
         <div id="roomVersionDetail"></div></div>`;
       bindInspectClose();
-      const reasonTxt = { manual: '手动保存', pre_activate: '激活前自动备份', pre_rollback: '回滚前自动备份', topo_edit: '拓扑变更', settings_edit: '设置变更' };
+      const reasonTxt = { manual: '手动保存', pre_activate: '激活前自动备份', pre_rollback: '回滚前自动备份', pre_import: '导入前自动备份', topo_edit: '拓扑变更', settings_edit: '设置变更' };
       $('#roomVersions').innerHTML = (versions || []).map(v => {
         const ts = v.created_at || v.time || '';
         const formatted = Number.isFinite(Date.parse(ts)) ? Charts.fmtFull(Date.parse(ts)) : ts;
@@ -2996,6 +3179,23 @@ body { padding: 32px 16px; }
         </ul></div>
       </div></div></div>
 
+      <div class="panel" id="mCallsPanel"><div class="ph">工具调用日志<span class="r btns" style="margin:0"><button class="btn small" id="mcRefresh">刷新</button></span></div><div class="pb">
+        <div class="help" style="margin-top:0">记录网页 AI（诊断、自检、报告、一键优化、自主发现）和外部 MCP 客户端发起的每一次工具调用：关联 ID、机房、工具、完整参数与返回、错误、开始时间和耗时。
+          Webhook 地址、密钥、令牌、SNMP 团体名等凭据写入前已脱敏；单条记录不截断，日志按天保存于 <code>data/mcp_calls/</code>，保留 <span id="mcKeep">30</span> 天。</div>
+        <form class="mc-filter" id="mcFilter">
+          <select name="profile"><option value="current">当前机房</option><option value="all">全部机房</option></select>
+          <select name="source"><option value="">全部来源</option><option value="ai">网页 AI</option><option value="mcp">外部 MCP</option></select>
+          <select name="status"><option value="">全部状态</option><option value="ok">成功</option><option value="error">失败</option><option value="denied">已拒绝</option></select>
+          <input name="tool" placeholder="工具名">
+          <input name="run" placeholder="关联 ID（run-…）">
+          <input name="q" placeholder="关键字（参数、错误）">
+          <button class="btn small primary" type="submit">筛选</button>
+        </form>
+        <div class="table-wrap"><table class="grid flat mc-table"><thead><tr><th>时间</th><th>机房</th><th>来源</th><th>工具</th><th>状态</th><th class="num">耗时</th><th class="num">返回</th><th>关联 ID</th></tr></thead><tbody id="mcRows"><tr><td colspan="8" class="muted">正在加载…</td></tr></tbody></table></div>
+        <div class="btns"><button class="btn small hidden" id="mcMore">加载更早的记录</button></div>
+        <div id="mcDetail"></div>
+      </div></div>
+
       <div class="panel"><div class="ph"><span class="no">6</span>工具<span class="r muted" id="mToolCnt"></span></div><div class="pb" style="padding:0">
         <table class="grid flat"><thead><tr><th>工具</th><th>说明</th><th>类型</th></tr></thead><tbody id="mTools"></tbody></table>
       </div></div>
@@ -3008,7 +3208,7 @@ body { padding: 32px 16px; }
       <div class="panel"><div class="ph"><span class="no">9</span>安全说明</div><div class="pb"><ul class="help" style="margin:0;padding-left:18px">
         <li>可写模式下 AI 能修改拓扑、告警开关和监控时段，修改立即写入 topology.yaml / config.yaml。只需查询时请开启「只读模式」。</li>
         <li>管理网页对局域网开放时，建议设置<b>访问令牌</b>；设置后 MCP 只认令牌，不再使用网页的登录账号。</li>
-        <li>所有 MCP 写操作都会记录到 <code>logs/netping.log</code>（含来源 IP），删除和整体替换类工具会提示 AI 先征得你的确认。</li>
+        <li>所有 MCP 写操作都会记录到 <code>logs/netping.log</code>（含来源 IP），删除和整体替换类工具会提示 AI 先征得你的确认；每次工具调用的完整参数与返回见上方「工具调用日志」。</li>
         <li>整体替换拓扑（replace_topology_yaml）默认只做校验（dry run），需明确 dry_run=false 才会写入；校验失败不会改动任何数据。</li>
       </ul></div></div>
     </div></div>`;
@@ -3161,6 +3361,69 @@ body { padding: 32px 16px; }
       }
     };
     load().catch(e => toast(errMsg(e), true));
+
+    // ---- 工具调用日志 ----
+    const SRC_TXT = { ai_diagnose: 'AI 诊断', ai_report: 'AI 报告', ai_optimize: 'AI 优化', ai_discover: 'AI 发现', ai: '网页 AI', mcp: '外部 MCP' };
+    const ST_TXT = { ok: ['成功', 'ok'], error: ['失败', 'down'], denied: ['已拒绝', 'slow'] };
+    const fmtBytes = b => b == null ? '-' : b >= 1048576 ? (b / 1048576).toFixed(1) + ' MB' : b >= 1024 ? (b / 1024).toFixed(1) + ' KB' : b + ' B';
+    let calls = [], callsMore = false;
+    const presetRun = sessionStorage.getItem('np_mcp_run');
+    if (presetRun) { sessionStorage.removeItem('np_mcp_run'); $('#mcFilter').elements.run.value = presetRun; setTimeout(() => $('#mCallsPanel').scrollIntoView({ block: 'start' }), 50); }
+    function callsQuery(after) {
+      const f = $('#mcFilter').elements, q = new URLSearchParams();
+      for (const k of ['profile', 'source', 'status', 'tool', 'run', 'q']) { const v = f[k].value.trim(); if (v) q.set(k, v); }
+      q.set('limit', '50');
+      if (after) q.set('after', after);
+      return 'api/mcp/calls?' + q.toString();
+    }
+    function drawCalls() {
+      $('#mcRows').innerHTML = calls.map(c => {
+        const [st, cls] = ST_TXT[c.status] || [c.status, 'unknown'];
+        return `<tr data-call="${esc(c.id)}"><td class="mono">${esc(Charts.fmtFull(c.started_at))}</td><td>${esc(c.profile_name || c.profile_id)}</td>
+          <td>${esc(SRC_TXT[c.source] || c.source)}${c.phase === 'review' ? ' · 自检' : ''}</td>
+          <td class="mono" title="${esc(c.args_preview || '')}"><b>${esc(c.tool)}</b>${c.title ? `<br><span class="muted" style="font-family:var(--sans)">${esc(c.title)}</span>` : ''}</td>
+          <td><span class="badge ${cls}">${esc(st)}</span>${c.model_truncated ? ' <span class="badge unknown" title="模型收到的是按长度上限截断的结果，日志中保存了完整结果">模型侧截断</span>' : ''}</td>
+          <td class="num">${c.duration_ms} ms</td><td class="num">${fmtBytes(c.result_bytes)}</td><td class="mono">${esc(c.run_id || c.rpc_id || '-')}</td></tr>`;
+      }).join('') || '<tr><td colspan="8" class="muted">没有符合条件的调用记录</td></tr>';
+      $('#mcMore').classList.toggle('hidden', !callsMore);
+    }
+    async function loadCalls(append) {
+      const after = append && calls.length ? calls[calls.length - 1].id : '';
+      try {
+        const d = await api('GET', callsQuery(after));
+        calls = append ? calls.concat(d.items || []) : (d.items || []);
+        callsMore = !!d.more;
+        if (d.retention_days) $('#mcKeep').textContent = d.retention_days;
+        drawCalls();
+      } catch (e) { $('#mcRows').innerHTML = `<tr><td colspan="8" class="v-down">读取失败：${esc(errMsg(e))}</td></tr>`; }
+    }
+    const pretty = t => { try { return JSON.stringify(JSON.parse(t), null, 2); } catch (e) { return t || ''; } };
+    async function showCall(id) {
+      const box = $('#mcDetail');
+      box.innerHTML = '<p class="muted">正在读取完整记录…</p>';
+      try {
+        const c = await api('GET', 'api/mcp/calls/' + encodeURIComponent(id));
+        const [st, cls] = ST_TXT[c.status] || [c.status, 'unknown'];
+        const kv = (k, v) => v ? `<div class="kv"><span>${k}</span><code>${esc(String(v))}</code></div>` : '';
+        box.innerHTML = `<div class="mc-detail">
+          <div class="room-preview-head"><h3>${esc(c.tool)} <span class="badge ${cls}">${esc(st)}</span></h3>
+            <div class="btns" style="margin:0"><a class="btn small" href="api/mcp/calls/${encodeURIComponent(c.id)}/download" download>下载完整记录</a><button class="btn small" id="mcClose">关闭</button></div></div>
+          ${kv('调用 ID', c.id)}${kv('关联 ID', c.run_id)}${kv('模型 tool_call_id', c.tool_call_id)}${kv('JSON-RPC id', c.rpc_id)}
+          ${kv('来源', (SRC_TXT[c.source] || c.source) + (c.phase === 'review' ? ' · 自检' : ''))}${kv('客户端', c.remote)}
+          ${kv('机房', (c.profile_name || '') + ' (' + c.profile_id + ')')}${kv('开始时间', Charts.fmtFull(c.started_at))}${kv('耗时', c.duration_ms + ' ms')}
+          ${c.redacted ? '<div class="help">部分凭据字段已脱敏（显示为 ***已脱敏***）。</div>' : ''}
+          ${c.model_truncated ? '<div class="help v-warn">模型实际收到的结果因长度上限被截断；下面是完整结果。</div>' : ''}
+          ${c.error ? `<div class="ai-err">错误：${esc(c.error)}</div>` : ''}
+          <div class="ai-think-label">参数（${fmtBytes((c.args || '').length)}）</div><pre class="ai-code mc-pre">${esc(pretty(c.args))}</pre>
+          <div class="ai-think-label">返回（${fmtBytes(c.result_bytes)}）</div><pre class="ai-code mc-pre">${esc(pretty(c.result)) || '<span class="muted">（无）</span>'}</pre></div>`;
+        $('#mcClose').onclick = () => { box.innerHTML = ''; };
+      } catch (e) { box.innerHTML = `<p class="v-down">读取失败：${esc(errMsg(e))}</p>`; }
+    }
+    $('#mcFilter').onsubmit = ev => { ev.preventDefault(); $('#mcDetail').innerHTML = ''; loadCalls(false); };
+    $('#mcRefresh').onclick = () => loadCalls(false);
+    $('#mcMore').onclick = () => loadCalls(true);
+    $('#mcRows').onclick = ev => { const tr = ev.target.closest('tr[data-call]'); if (tr) showCall(tr.dataset.call); };
+    loadCalls(false);
     return {};
   }
 
@@ -3570,13 +3833,13 @@ body { padding: 32px 16px; }
     async function runAid(req) {
       openAid();
       const body = $('#aidBody'), foot = $('#aidFoot');
-      const st = { status: '正在连接…', tools: [], text: '', error: '' };
+      const st = { status: '正在连接…', tools: [], text: '', error: '', think: thinkNew() };
       const draw = () => {
         if (!aid) return;
         const pre = st.text.split('```')[0].trim();
         body.innerHTML = `${req.hint || (req.subnets || []).length ? `<div class="help" style="margin-top:0">${req.hint ? '要求：' + esc(req.hint) : ''}
             ${(req.subnets || []).length ? ' 指定网段：<span class="mono">' + esc(req.subnets.join('、')) + '</span>' : ''}</div>` : ''}
-          ${st.tools.length ? `<div class="ai-tools">${st.tools.map(t => `<span class="ai-tool" title="${esc(t.args || '')}">${esc(t.title || t.name)}${t.short ? ' · ' + esc(t.short) : ''}</span>`).join('')}</div>` : ''}
+          ${thinkHTML(st.think)}
           ${pre ? `<div class="ai-md">${mdLite(pre)}</div>` : ''}
           ${st.text.includes('```') && !st.error ? '<div class="ai-status"><span class="ai-spin"></span>正在生成发现清单…</div>' : ''}
           ${st.status ? `<div class="ai-status"><span class="ai-spin"></span>${esc(st.status)}</div>` : ''}
@@ -3593,6 +3856,7 @@ body { padding: 32px 16px; }
       const shortArgs = a => { try { const o = JSON.parse(a || '{}'); return [].concat(o.subnets || [], o.ips || [], o.ip || [], o.mac || [], o.switch || []).join(' ').slice(0, 60); } catch (e) { return ''; } };
       try {
         await streamNDJSON('api/ai/discover', req, ctl.signal, ev => {
+          thinkEvent(st.think, ev);
           if (ev.t === 'status') st.status = ev.text;
           else if (ev.t === 'stats') st.status = `已汇总网络线索：${ev.stats.candidates} 个候选网段，已登记 ${ev.stats.nodes} 个节点、${ev.stats.switches} 台交换机，正在请求模型…`;
           else if (ev.t === 'delta') { st.text += ev.text; st.status = ''; }
@@ -3608,8 +3872,10 @@ body { padding: 32px 16px; }
           draw();
         });
         if (!result && !st.error) st.error = '模型没有返回结果，请重试。';
+        thinkFinish(st.think, result ? 'done' : 'error', st.error);
       } catch (e) {
         st.error = e.name === 'AbortError' ? '已停止' : errMsg(e);
+        thinkFinish(st.think, e.name === 'AbortError' ? 'stopped' : 'error', e.name === 'AbortError' ? '' : st.error);
       } finally {
         if (aid) aid.busy = null;
       }
